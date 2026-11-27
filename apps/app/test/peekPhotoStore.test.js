@@ -411,6 +411,54 @@ test('dropAuthors, dropRanges and retain take any iterable', async (t) => {
   t.is(await store.dropAuthors(null), false)
 })
 
+test('keepOnlyAuthors deletes the unlisted authors in the queue, under this binding only', async (t) => {
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', A, desc({ start: 1 }), bytesOf(4))
+    await store.put('peekPosts', B, desc({ start: 10 }), bytesOf(4))
+    await store.put('peekAvatars', B, desc({ start: 20 }), bytesOf(4))
+    t.is(await store.keepOnlyAuthors(new Set([A.toUpperCase()])), true)
+    t.alike([...backend.state.meta.values()].map((r) => r.start), [1], 'only the listed author stays')
+    t.is(await store.keepOnlyAuthors([]), true)
+    t.is(backend.state.meta.size, 0, 'an empty list keeps nobody')
+    t.is(await store.keepOnlyAuthors(A), false, 'a string is not a list')
+    t.is(await store.keepOnlyAuthors(null), false)
+  }
+  {
+    const { backend, second } = await twoStores()
+    t.is(await second.keepOnlyAuthors([A]), false, 'not bound yet')
+    t.is(await second.bind(ME), true)
+    t.alike(await second.read('peekPosts', B, desc({ start: 1 })), bytesOf(4), 'and not kept for the first bind')
+    t.is(backend.state.meta.size, 2)
+  }
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', B, desc(), bytesOf(4))
+    const wiped = store.wipe()
+    t.is(await store.keepOnlyAuthors([A]), false, 'a wipe queued before turns it off')
+    t.is(await wiped, true)
+    t.absent(backend.state.calls.includes('remove'))
+  }
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', B, desc(), bytesOf(4))
+    const gate = {}
+    const list = backend.list
+    backend.list = async () => { await new Promise((resolve) => { gate.open = resolve }); return list() }
+    const pending = store.keepOnlyAuthors([A])
+    await new Promise((resolve) => setImmediate(resolve))
+    const rebound = store.bind({ ...ME, owner: B })
+    backend.list = list
+    gate.open()
+    t.is(await pending, false, 'a rebind while it lists gives up')
+    t.absent(backend.state.calls.includes('remove'), 'and removes nothing for the old binding')
+    await rebound
+  }
+})
+
 test('a put after another tab rebinds or wipes writes nothing', async (t) => {
   const { store, backend } = await setup()
   await store.bind(ME)
@@ -471,15 +519,16 @@ test('group pictures: put, read back, limits and checks', async (t) => {
   const m = await load()
   const { store, backend, clock } = await copySetup()
   await store.bind(ME)
-  t.is(await store.putThumb(B.toUpperCase(), SHA, bytesOf(10), 'image/png'), true)
+  t.is(await store.putThumb(B.toUpperCase(), SHA, bytesOf(10), 'image/jpeg'), true)
   const name = 'copyGroupThumbs/' + B + '-' + SHA
-  t.alike(backend.state.meta.get(name), { name, kind: 'copyGroupThumbs', author: B, sha256: SHA, mime: 'image/png', size: 10, savedAt: clock.t })
+  t.alike(backend.state.meta.get(name), { name, kind: 'copyGroupThumbs', author: B, sha256: SHA, mime: 'image/jpeg', size: 10, savedAt: clock.t })
   t.alike(await store.readThumb(B, SHA), bytesOf(10))
   t.is(await store.readThumb(B, SHA2), null)
   for (const [author, sha, bytes, mime, why] of [
     ['nope', SHA, bytesOf(4), 'image/jpeg', 'author'],
     [B, 'zz'.repeat(32), bytesOf(4), 'image/jpeg', 'hash'],
     [B, SHA2, bytesOf(4), 'text/html', 'mime'],
+    [B, SHA2, bytesOf(4), 'image/png', 'a type the live draw never shows'],
     [B, SHA2, new Uint8Array(0), 'image/jpeg', 'empty'],
     [B, SHA2, bytesOf(m.GROUP_THUMB_MAX_BYTES + 1), 'image/jpeg', 'over 256 KiB'],
     [B, SHA2, [1, 2], 'image/jpeg', 'bytes only']

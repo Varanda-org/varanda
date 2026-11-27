@@ -20,7 +20,10 @@
 // the Espiadinha shows) is fetched as with false; only the bounded peek
 // kinds of the kept store may hold it. persist 'copy' (a reopened screen's
 // saved copy) is fetched as with true for a followed author and as with
-// false for anyone else (../media/keptLoad.js fetchPersist).
+// false for anyone else (../media/keptLoad.js fetchPersist). On the web
+// every photo is fetched no-store, whatever persist says: the kept store
+// there is IndexedDB, and the browser HTTP cache is never used to keep one
+// (../media/keep.web.js).
 //
 // A private group picture (privateItem) is opened only by the node. Two props,
 // both off by default, let a reopened screen draw it before the node answers:
@@ -376,13 +379,10 @@ function usePrivateAvatarUrl (mediaAuthor, item, keepThumb) {
     if (key === null) return
     let alive = true
     let timer = null
-    const ctx = { node, identity, display, fetchDeps: { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) } }
+    const fetchDeps = { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) }
     const keep = keeping ? groupThumbKeeper(mediaAuthor, item.plainSha256) : null
-    if (keep !== null) {
-      ctx.keep = keep
-      ctx.readFile = readLocalBytes
-    }
-    sourceFor(ref, ctx).then((entry) => {
+    const keepDeps = keep !== null ? { keep, readFile: readLocalBytes } : {}
+    sourceFor(ref, { node, identity, display, fetchDeps, ...keepDeps }).then((entry) => {
       if (!alive) return
       setResult({ key, attempt, node, entry })
       // Private blocks may arrive after the row, so retry only transient reads.

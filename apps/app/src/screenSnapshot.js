@@ -725,12 +725,15 @@ function parseNames (list, authors, owner) {
   return out
 }
 
-// An entry from before the names has six keys.
+// An entry from before the names has six keys. The cap is measured without
+// the names, which parseNames bounds: an old entry near the cap grows past it
+// when it is written back with names [], and must still load next time.
 function parseMemberEntry (e, author, owner) {
   if (!isPlain(e) || !(exactKeys(e, MEMBER_KEYS.concat(['names'])) || exactKeys(e, MEMBER_KEYS))) return null
   if (!Number.isSafeInteger(e.openedAt) || e.openedAt < 0) return null
   if (!(e.before === null || isSeq(e.before)) || typeof e.atEnd !== 'boolean') return null
-  if (bytesOf(e) > MEMBER_ENTRY_MAX_BYTES) return null
+  const { names: _names, ...sized } = e
+  if (bytesOf(sized) > MEMBER_ENTRY_MAX_BYTES) return null
   const header = profileOf(e.header, true)
   if (header === null || !Array.isArray(e.items) || e.items.length > MAX_ITEMS) return null
   const items = e.items.map((i) => itemOf(i, true))
@@ -1068,9 +1071,15 @@ export function createScreenSnapshotStore (raw) {
     const snapshot = parseScreenSnapshot(text, kind, binding)
     if (snapshot === null) clear(kind)
     // A delegated parse drops entries past their own age (a chat saved 14
-    // days ago beside a fresher one): the stored text loses them too. A
-    // 'membro' copy from before the names is written back as a build would.
-    else if (codecOf(kind) !== null || kind === 'membro') replace(kind, text, storable(kind, snapshot))
+    // days ago beside a fresher one): the stored text loses them too.
+    else if (codecOf(kind) !== null) replace(kind, text, storable(kind, snapshot))
+    // A 'membro' copy from before the names is written back as a build
+    // would. One the names [] would grow past the file cap stays as it is: it
+    // still parses, and the next save replaces it.
+    else if (kind === 'membro') {
+      const out = storable(kind, snapshot)
+      if (out !== null) replace(kind, text, out)
+    }
     return snapshot
   }
 

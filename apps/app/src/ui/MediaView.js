@@ -21,7 +21,9 @@
 // Espiadinha shows) is fetched the same way; only the bounded peek kinds of
 // the kept store may hold it. persist 'copy' (a reopened screen's saved copy)
 // is fetched as true for a followed author and as false for anyone else
-// (../media/keptLoad.js fetchPersist).
+// (../media/keptLoad.js fetchPersist). On the web every photo is fetched
+// no-store, whatever persist says: the kept store there is IndexedDB, and the
+// browser HTTP cache is never used to keep one (../media/keep.web.js).
 // `uri` (instead of author and descriptor): a device-local blob: or file://
 // URI another module already verified (chat photos, ../media/chatMedia.js);
 // it is shown as is and nothing is fetched. Any other scheme is refused.

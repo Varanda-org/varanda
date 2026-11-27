@@ -74,6 +74,9 @@ export const KEEP_COPY_MAX_BYTES = 8388608
 export const KEEP_COPY_MAX_FILES = 200
 export const KEEP_COPY_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 export const KEEP_GROUP_THUMB_MAX_BYTES = 262144
+// The only picture the live draw shows (a 512x512 JPEG), so one file per
+// author and hash.
+const THUMB_MIME = 'image/jpeg'
 // A followed author's photo may also be fetched into the HTTP cache
 // (./keptLoad.js fetchPersist); the web's answer (./keep.web.js) is no.
 export const httpCacheKeeps = true
@@ -387,19 +390,16 @@ export function keptGroupThumb (author, sha) {
     const base = thumbParts(author, sha)
     if (base === null) return null
     trimOnce(COPY)
-    for (const ext of Object.values(EXT)) {
-      const name = base + '.' + ext
-      const file = new File(kindDir(THUMBS), name)
-      if (!file.exists) continue
-      const size = file.size
-      if (size < 1 || size > KEEP_GROUP_THUMB_MAX_BYTES || expired(file, COPY.maxAge)) {
-        dropEntry({ key: THUMBS + '/' + name, file })
-        continue
-      }
-      markUsed(THUMBS + '/' + name)
-      return file.uri
+    const name = base + '.' + EXT[THUMB_MIME]
+    const file = new File(kindDir(THUMBS), name)
+    if (!file.exists) return null
+    const size = file.size
+    if (size < 1 || size > KEEP_GROUP_THUMB_MAX_BYTES || expired(file, COPY.maxAge)) {
+      dropEntry({ key: THUMBS + '/' + name, file })
+      return null
     }
-    return null
+    markUsed(THUMBS + '/' + name)
+    return file.uri
   } catch {
     return null
   }
@@ -410,7 +410,7 @@ export function keptGroupThumb (author, sha) {
 export function keepGroupThumb (author, sha, bytes, mime) {
   try {
     const base = thumbParts(author, sha)
-    if (base === null || !Object.hasOwn(EXT, mime) || !(bytes instanceof Uint8Array)) return null
+    if (base === null || mime !== THUMB_MIME || !(bytes instanceof Uint8Array)) return null
     if (bytes.byteLength < 1 || bytes.byteLength > KEEP_GROUP_THUMB_MAX_BYTES) return null
     return write(THUMBS, base + '.' + EXT[mime], bytes, false)
   } catch {

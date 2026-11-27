@@ -9,6 +9,7 @@ function inert () {
     readThumb: async () => null,
     putThumb: async () => false,
     dropAuthors: async () => false,
+    keepOnlyAuthors: async () => false,
     dropRanges: async () => false,
     retain: async () => false,
     retainThumbs: async () => false,

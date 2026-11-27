@@ -36,7 +36,8 @@ export const COPY_PHOTO_MAX_BYTES = 8388608
 export const COPY_PHOTO_MAX_FILES = 200
 export const COPY_PHOTO_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 export const GROUP_THUMB_MAX_BYTES = 262144
-const THUMB_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
+// The only picture the live draw shows (a 512x512 JPEG).
+const THUMB_MIMES = Object.freeze(['image/jpeg'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -328,6 +329,24 @@ export function createPeekPhotoStore ({
     return removeWhere((row) => set.has(row.author))
   }
 
+  // Deletes the photos of every author `keys` does not name. The rows are
+  // read in the queue, after any bind or wipe queued before, and only while
+  // this binding holds. Never kept for later: the next follow reconcile asks
+  // again, and a later bind may be another member's.
+  function keepOnlyAuthors (keys) {
+    const list = listOf(keys)
+    if (list === null) return Promise.resolve(false)
+    const set = new Set(list.map(authorOf).filter((k) => k !== null))
+    epoch++
+    const at = bindEpoch
+    return enqueue(async () => {
+      if (ready === null || !bindLive(at)) return false
+      const names = (await rows()).filter((row) => row && typeof row.name === 'string' && !set.has(row.author)).map((row) => row.name)
+      if (!bindLive(at)) return false
+      return removeNames(names)
+    }, false)
+  }
+
   function dropRanges (ranges) {
     const given = listOf(ranges)
     if (given === null) return Promise.resolve(false)
@@ -374,5 +393,5 @@ export function createPeekPhotoStore ({
     return enqueue(async () => (await backend.clear()) === true, false)
   }
 
-  return { bind, read, put, readThumb, putThumb, dropAuthors, dropRanges, retain, retainThumbs, wipe }
+  return { bind, read, put, readThumb, putThumb, dropAuthors, keepOnlyAuthors, dropRanges, retain, retainThumbs, wipe }
 }

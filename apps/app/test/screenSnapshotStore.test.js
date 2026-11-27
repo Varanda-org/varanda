@@ -235,6 +235,87 @@ test('native: a membro copy from before the names loads with none and is rewritt
   t.alike([...globalThis.__files.keys()], [pathOf('membro')], 'no .tmp or .bak left')
 })
 
+// A full page of long posts, about 57 KB as an entry.
+async function bigMembro (previous, author, followed) {
+  const { buildScreenSnapshot } = await loadRules()
+  const items = []
+  for (let seq = 32; seq >= 1; seq--) items.push({ ...post(author, seq), text: 'y'.repeat(1600) })
+  return buildScreenSnapshot('membro', {
+    ...binding(),
+    previous,
+    author,
+    header: { name: 'Bia', username: 'bia', bio: null, avatar: null },
+    items,
+    before: null,
+    atEnd: true,
+    originals: null,
+    followed
+  })
+}
+
+const sizeOf = (v) => Buffer.byteLength(JSON.stringify(v))
+
+// The entry as the code before the names wrote it, its texts grown by `add` bytes.
+async function oldEntry (entry, add) {
+  const { MAX_TEXT_UNITS } = await import('../src/snapshotParts.js')
+  const e = JSON.parse(JSON.stringify(entry))
+  delete e.names
+  for (const item of e.items) {
+    const n = Math.min(add, MAX_TEXT_UNITS - item.text.length)
+    item.text += 'x'.repeat(n)
+    add -= n
+  }
+  if (add !== 0) throw new Error('no room to pad')
+  return e
+}
+
+test('native: an old membro entry the names push past the entry cap still loads after its rewrite', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration } = await loadCaches()
+  const { MEMBER_ENTRY_MAX_BYTES } = await loadRules()
+  t.is(store.saveScreenSnapshot('membro', await bigMembro(null, FOLLOW, [FOLLOW]), cacheGeneration()), true)
+  const old = JSON.parse(globalThis.__files.get(pathOf('membro')))
+  const stripped = await oldEntry(old.body.authors[FOLLOW], 0)
+  old.body.authors[FOLLOW] = await oldEntry(stripped, MEMBER_ENTRY_MAX_BYTES - 6 - sizeOf(stripped))
+  t.is(sizeOf(old.body.authors[FOLLOW]), MEMBER_ENTRY_MAX_BYTES - 6)
+  globalThis.__files.set(pathOf('membro'), JSON.stringify(old))
+  const first = store.loadScreenSnapshot('membro', binding())
+  t.ok(first, 'the old copy loads')
+  t.alike(first.body.authors[FOLLOW].names, [])
+  t.ok(globalThis.__files.get(pathOf('membro')).includes('"names":[]'), 'and is written back with names')
+  t.ok(sizeOf(first.body.authors[FOLLOW]) > MEMBER_ENTRY_MAX_BYTES, 'past the entry cap')
+  t.alike(store.loadScreenSnapshot('membro', binding()), first, 'the rewrite loads the next time')
+  t.ok(globalThis.__files.has(pathOf('membro')))
+})
+
+test('native: an old membro copy the names push past the file cap is kept as it is', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration } = await loadCaches()
+  const { MEMBER_ENTRY_MAX_BYTES, SCREEN_SNAPSHOT_MAX_BYTES } = await loadRules()
+  const all = [FOLLOW, OTHER, 'c1'.repeat(32), 'c2'.repeat(32)]
+  let built = null
+  for (const author of all) built = await bigMembro(built, author, all)
+  t.is(store.saveScreenSnapshot('membro', built, cacheGeneration()), true)
+  const old = JSON.parse(globalThis.__files.get(pathOf('membro')))
+  for (const k of all) old.body.authors[k] = await oldEntry(old.body.authors[k], 0)
+  let need = SCREEN_SNAPSHOT_MAX_BYTES - 20 - sizeOf(old)
+  for (const k of all) {
+    const add = Math.min(need, MEMBER_ENTRY_MAX_BYTES - 40 - sizeOf(old.body.authors[k]))
+    old.body.authors[k] = await oldEntry(old.body.authors[k], add)
+    need -= add
+  }
+  t.is(need, 0, 'the old copy is 20 bytes under the file cap')
+  const text = JSON.stringify(old)
+  globalThis.__files.set(pathOf('membro'), text)
+  const first = store.loadScreenSnapshot('membro', binding())
+  t.ok(first, 'it loads')
+  t.ok(sizeOf(first) > SCREEN_SNAPSHOT_MAX_BYTES, 'its rewrite with names would not fit')
+  t.is(globalThis.__files.get(pathOf('membro')), text, 'so the stored text stays')
+  t.alike(store.loadScreenSnapshot('membro', binding()), first, 'and loads the next time')
+})
+
 test('registry: momentos is wiped with every kind and rewritten by a block or an unfollow', async (t) => {
   fresh(t)
   const store = await loadNative()

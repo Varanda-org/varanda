@@ -12,7 +12,7 @@
 // in-memory cache turns into an object URL and revokes. Each purge returns a
 // promise of the stores' answers, which never rejects.
 
-import { copyPhotos, keptBackend, keptPhotos, peekPhotos } from './peekPhotos.web.js'
+import { copyPhotos, keptPhotos, peekPhotos } from './peekPhotos.web.js'
 
 export const KEEP_MAX_BYTES = 67108864
 export const KEEP_MAX_FILES = 2000
@@ -71,25 +71,14 @@ export function dropKeptRanges (ranges) { return all(keptPhotos.dropRanges(range
 export function dropKeptAuthors (keys) { return all(keptPhotos.dropAuthors(keys), peekPhotos.dropAuthors(keys), copyPhotos.dropAuthors(keys)) }
 
 // A follow reconcile prunes only the main store, as on the phone: retainKept
-// and the other purges remove peek and copy photos. The store has no
-// keep-only of its own, so the authors to drop are read from its rows. The
-// empty drop first waits behind every put already queued and cancels those
-// not yet written, so none lands after the listing. Anything but an
+// and the other purges remove peek and copy photos. The store cancels the
+// puts queued before it, so none lands after its listing. Anything but an
 // iterable of keys is ignored rather than read as "nobody".
 export function keepOnlyKeptAuthors (allowed) {
   if (allowed === null || typeof allowed !== 'object' || typeof allowed[Symbol.iterator] !== 'function') return null
   let keepSet
-  try { keepSet = new Set(Array.from(allowed, (k) => typeof k === 'string' ? k.toLowerCase() : null).filter((k) => k !== null && HEX64.test(k))) } catch { return null }
-  return keptPhotos.dropAuthors([])
-    .then(() => keptBackend.list())
-    .then((rows) => {
-      const drop = new Set()
-      for (const row of Array.isArray(rows) ? rows : []) {
-        if (row && typeof row.author === 'string' && !keepSet.has(row.author)) drop.add(row.author)
-      }
-      return drop.size === 0 ? true : keptPhotos.dropAuthors(drop)
-    })
-    .then((ok) => ok === true, () => false)
+  try { keepSet = Array.from(allowed, (k) => typeof k === 'string' ? k.toLowerCase() : null).filter((k) => k !== null && HEX64.test(k)) } catch { return null }
+  return keptPhotos.keepOnlyAuthors(keepSet).then((ok) => ok === true, () => false)
 }
 
 // Object URLs are released by the in-memory cache that made them.

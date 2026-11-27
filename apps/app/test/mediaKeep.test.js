@@ -920,10 +920,10 @@ test('group pictures: keep, read back, limits and retainGroupThumbs', async (t) 
   reset()
   const keep = await load()
   keep.wipeKept()
-  const uri = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/png')
-  t.is(uri, ROOT + 'copyGroupThumbs/' + B + '-' + SHA + '.png', 'named by image author and plaintext hash')
+  const uri = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  t.is(uri, ROOT + 'copyGroupThumbs/' + B + '-' + SHA + '.jpg', 'named by image author and plaintext hash')
   t.is(keep.keptGroupThumb(B.toUpperCase(), SHA), uri, 'the author is lowercased')
-  t.is(keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/png'), uri, 'keeping again is idempotent')
+  t.is(keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg'), uri, 'keeping again is idempotent')
   t.is(keep.keptGroupThumb(B, SHA2), null, 'another picture is not kept')
   t.is(keep.keptGroupThumb(A, SHA), null, 'nor another author\'s')
   for (const [author, sha, bytes, mime, why] of [
@@ -931,6 +931,7 @@ test('group pictures: keep, read back, limits and retainGroupThumbs', async (t) 
     [A, '../' + SHA.slice(3), bytesOf(10), 'image/jpeg', 'hash'],
     [A, SHA.toUpperCase().replace(/F/g, 'G'), bytesOf(10), 'image/jpeg', 'non-hex hash'],
     [A, SHA, bytesOf(10), 'text/html', 'mime'],
+    [A, SHA, bytesOf(10), 'image/png', 'a type the live draw never shows'],
     [A, SHA, new Uint8Array(0), 'image/jpeg', 'empty'],
     [A, SHA, bytesOf(keep.KEEP_GROUP_THUMB_MAX_BYTES + 1), 'image/jpeg', 'over 256 KiB'],
     [A, SHA, [1, 2], 'image/jpeg', 'bytes only']
