@@ -280,9 +280,10 @@ test('a public group picture by a blocked author is not stored; the row is', asy
     { community: C1, group: G2, role: 'member', general: false, name: 'Serra', image: IMAGE, imageAuthor: OTHER }
   ], 'only the blocked author\'s picture goes')
   t.ok(snap.parseScreenSnapshot(JSON.stringify(blocked), 'conversasGrupos', b), 'and it parses (five keys)')
-  const plain = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live })
+  const now = Date.now()
+  const plain = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, now })
   t.alike(plain.body.rows[0], { community: C1, group: G1, role: 'member', general: false, name: 'Praia', image: IMAGE, imageAuthor: IMAGE_AUTHOR }, 'no blocked input: as before')
-  t.alike(snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, blocked: new Set() }), plain, 'nobody blocked: the same')
+  t.alike(snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, blocked: new Set(), now }), plain, 'nobody blocked: the same')
   const hook = groupHook.slice(0, groupHook.indexOf('const load = useCallback'))
   t.ok(/const blocks = useBlocks\(\)\s*const blockedRef = useRef\(blocks\.keys\)\s*blockedRef\.current = blocks\.keys/.test(hook), 'the save reads the block list of the latest render')
 })
