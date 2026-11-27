@@ -260,13 +260,22 @@ async function mutesPushHarness (answers) {
   const commitText = slice('const commit = useCallback(', '}, [])')
   const reloadText = slice('const reload = useCallback(', '}, [commit])')
   const openText = slice('// worker only once one is; a list read before that is sent now.\n  useEffect(', '}, [sessionKey, node.epoch])')
+  const setText = slice('const setMute = useCallback(', '}, [commit, refresh])')
   const reported = []
   const deps = {
     liveWipeRef: { current: -1 },
     trustedRef: { current: false },
     saveQuietList: () => {},
     bindingRef: { current: {} },
-    requestRef: { current: async () => answers.shift() },
+    // A set always settles; an Error in the answers is a list read that fails.
+    requestRef: {
+      current: async (method) => {
+        if (method === 'mute.set') return {}
+        const answer = answers.shift()
+        if (answer instanceof Error) throw answer
+        return answer
+      }
+    },
     epochRef: { current: 0 },
     reloadSeqRef: { current: 0 },
     writesRef: { current: 0 },
@@ -279,11 +288,14 @@ async function mutesPushHarness (answers) {
     setKeys: () => {},
     reportMutes: (keys) => reported.push(keys),
     openPushLists: () => {},
-    sessionKey: A
+    sessionKey: A,
+    setChanged: () => {},
+    noop: () => {},
+    refresh: async () => {}
   }
   // eslint-disable-next-line no-new-func
   const make = new Function('deps', 'const {' + Object.keys(deps).join(', ') + '} = deps\n' +
-    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nreturn { reload, open: ' + openText + ' }')
+    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nconst setMute = ' + setText + '\nreturn { reload, setMute, open: ' + openText + ' }')
   return { ...make(deps), reported, deps }
 }
 
@@ -309,5 +321,23 @@ test('mutesProvider: a malformed mute.list never reaches the worker, as a read o
   t.alike(first.reported, [], 'a malformed first answer sends nothing')
   const src = fs.readFileSync(path.join(__dirname, '../src/mutesProvider.js'), 'utf8')
   const set = src.slice(src.indexOf('const setMute = useCallback'))
-  t.ok(/commit\(next\)\s*reportMutes\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setMute still goes to the worker')
+  t.ok(/commit\(next\)[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(listedRef\.current\) reportMutes\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setMute goes to the worker over a whole list read this run')
+})
+
+test('mutesProvider: a set over a list never read whole this run leaves the worker alone', async (t) => {
+  for (const first of [new Error('offline'), { keys: 'x' }, null]) {
+    const h = await mutesPushHarness([first, { keys: [B, A] }])
+    await h.reload().catch(() => {})
+    h.open()
+    t.alike(h.reported, [], 'no list yet')
+    await h.setMute(A, true)
+    t.ok(h.deps.keysRef.current.has(A), 'the screens have the key')
+    t.alike(h.reported, [], 'one key would replace the worker\'s whole list')
+    await h.setMute(A, false)
+    t.alike(h.reported, [], 'nor an undo')
+    await h.reload()
+    t.alike(h.reported, [[B, A]], 'the next whole read reports the list the node holds')
+    await h.setMute(C, true)
+    t.alike(h.reported, [[B, A], [B, A, C]], 'then a set reports the whole set')
+  }
 })

@@ -29,12 +29,16 @@ O diff não toca `apps/app/ios/`, `apps/app/android/`, `apps/app/assets/worklet/
 - Telas que salvam a cópia fora de A Rua e do Diário gravam com a lista mostrada (guardada ou ao vivo). O conteúdo é o mesmo que a cópia anterior já mostrava.
 - A leitura de desconhecidos no refresh em segundo plano mantém uma sincronização aberta por alguns segundos, que também sincroniza grupos.
 - Uma foto de grupo privado guardada logo depois de um salvamento antigo pode ser apagada uma vez e volta na abertura seguinte.
-- Membro: uma cópia antiga que passaria do limite do arquivo ao ganhar os nomes fica como está até o próximo salvamento.
+- Uma cópia antiga do Diário, do Membro ou das Conversas a poucos bytes do limite do arquivo pode ser apagada uma vez ao ganhar o campo de nomes. Volta no próximo salvamento.
+- Membro: na reabertura, uma citação de alguém bloqueado fica fora até a página ao vivo.
+- A foto de um grupo privado decifrada antes da lista de bloqueio desta abertura só é guardada na próxima vez que a linha aparece.
+- Web: depois de Sair ou Recomeçar, o pedido para o service worker apagar as listas se repete a cada abertura até as duas listas da nova sessão chegarem a ele. Um bloqueio ou silêncio feito antes da primeira leitura completa da lista só chega ao worker na leitura seguinte.
 - Fotos de grupos privados só vêm das linhas de Conversas, nunca de outro lugar. Chave, nonce e núcleo ficam no nó.
 - Refresh em segundo plano só no app nativo (a web não tem tarefa de fundo) e no máximo 6 pessoas desconhecidas por passagem. Uma falha de leitura pula aquela pessoa, sem nova tentativa.
+- O refresh em segundo plano guarda só os originais de reposts que já estavam na cópia e os que leu de desconhecidos. Uma citação ou resposta de quem se segue, e o nível seguinte dentro de um original, aparecem sem o original até a página ao vivo, como antes.
 - Se `block.list` falha, só as linhas da própria pessoa aparecem, como hoje.
 - Membro: a página que só se visita continua sem cópia.
-- A foto de quem não se segue só é guardada depois que a lista de bloqueio e a de seguidos desta abertura são conhecidas. Um bloqueio feito em outro aparelho vale quando a lista desta abertura chega.
+- A foto de quem não se segue só é guardada depois que a lista de bloqueio e a de seguidos desta abertura são conhecidas. Uma foto mostrada antes disso não é guardada nesta abertura. Um bloqueio feito em outro aparelho vale quando a lista desta abertura chega.
 
 ## Conferência no aparelho (não feita)
 

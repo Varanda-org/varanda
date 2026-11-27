@@ -132,14 +132,69 @@ test('membro snapshot: saved only after a live page, still followed, generation 
 })
 
 test('membro snapshot: unfollow and block remove the entry at once', (t) => {
-  t.ok(/mark\(author, on\)\s*if \(!on\) dropSnapshotEntry\(\)/.test(CODE), 'an unfollow here drops the entry')
-  t.ok(/if \(blockedHere\) dropSnapshotEntry\(\)/.test(CODE), 'a block drops the entry')
+  t.ok(/mark\(author, on\)\s*if \(!on\) dropSnapshotEntry\(false\)/.test(CODE), 'an unfollow here drops the entry')
+  t.ok(/if \(blockedHere\) dropSnapshotEntry\(true\)/.test(CODE), 'a block drops the entry')
   t.ok(/clearTimeout\(saveTimerRef\.current\)/.test(drop), 'a pending save is cancelled')
-  t.ok(/screenWithoutAuthors\(snapshot, \[author\]\)/.test(drop), 'the author and their reposts go')
+  t.ok(/block === true\s*\? screenWithoutAuthors\(snapshot, \[author\]\)/.test(drop), 'a block takes the author and their reposts out of every page')
   t.ok(/acting\.kind !== 'me'\) \{\s*clearScreenSnapshot\('membro'\)/.test(drop), 'acting as a page: everything goes')
   t.ok(/Object\.keys\(next\.body\.authors\)\.length === 0 \|\| !saveScreenSnapshot\('membro', next, cacheGeneration\(\)\)\) clearScreenSnapshot\('membro'\)/.test(drop), 'an empty or failed rewrite clears')
   const toggle = CODE.slice(CODE.indexOf('const togglePageFollow = async'), CODE.indexOf('const isFollowed ='))
   t.absent(/Snapshot|snapshot/.test(toggle), 'a page follow never touches the member snapshot')
+})
+
+// The drop callback's own text, run over a stored copy where FOLLOW's page
+// reposts and quotes OTHER, both pages kept.
+async function dropRun (block) {
+  const s = await import('../src/screenSnapshot.js')
+  const OTHER = 'dd'.repeat(32)
+  const id = { origin: 'https://bora.varanda.app', association: 'ee'.repeat(32), owner: OWN, acting: ME }
+  const at = (n) => new Date(Date.UTC(2026, 10, 1, 0, 0, n)).toISOString()
+  const post = (author, seq, extra = {}) => ({ kind: 'post', author, name: null, username: null, seq, at: at(seq), text: 'texto ' + seq, replyTo: null, quote: null, media: null, preview: null, ...extra })
+  const names = (a) => (a === OTHER ? { name: 'Davi', username: 'davi' } : undefined)
+  const header = { name: 'Bia', username: 'bia', bio: '', avatar: null }
+  const now = Date.now()
+  const followed = new Set([FOLLOW, OTHER])
+  const first = s.buildScreenSnapshot('membro', {
+    ...id,
+    now,
+    previous: null,
+    author: FOLLOW,
+    header,
+    items: [post(FOLLOW, 5, { quote: { author: OTHER, seq: 2 } }), { ...post(FOLLOW, 4), kind: 'repost', text: null, to: { author: OTHER, seq: 1 } }],
+    before: null,
+    atEnd: true,
+    originals: new Map([[OTHER + ':1', post(OTHER, 1)], [OTHER + ':2', post(OTHER, 2)]]),
+    names,
+    followed
+  })
+  const stored = s.buildScreenSnapshot('membro', { ...id, now: now + 1, previous: first, author: OTHER, header: { ...header, name: 'Davi' }, items: [post(OTHER, 3)], before: null, atEnd: true, originals: new Map(), names, followed })
+  const saved = []
+  const run = new Function('author', 'ownKey', 'snapRef', 'saveTimerRef', 'liveBinding', 'actingAs', 'loadScreenSnapshot', 'screenWithoutAuthors', 'screenKeepOnlyAuthors', 'saveScreenSnapshot', 'clearScreenSnapshot', 'cacheGeneration', 'return (block) ' + drop)( // eslint-disable-line no-new-func
+    OTHER, OWN, { current: { config: {} } }, { current: null }, () => ({ ...id }), { get: () => ME },
+    () => stored, s.screenWithoutAuthors, s.screenKeepOnlyAuthors,
+    (kind, next) => { saved.push(next); return true }, () => saved.push('clear'), () => 1)
+  run(block)
+  return { saved, before: stored, OTHER }
+}
+
+test('membro snapshot: an unfollow drops only that page; a block takes the author out of every page', async (t) => {
+  const kept = await dropRun(false)
+  t.is(kept.saved.length, 1, 'one save')
+  const after = kept.saved[0]
+  t.alike(Object.keys(after.body.authors), [FOLLOW], 'the unfollowed author\'s own page goes')
+  t.alike(after.body.authors[FOLLOW], kept.before.body.authors[FOLLOW], 'the other page is left as it was')
+  const page = after.body.authors[FOLLOW]
+  t.ok(page.items.some((i) => i.kind === 'repost' && i.to.author === kept.OTHER), 'their repost stays in the followed page')
+  t.ok(page.originals[kept.OTHER + ':1'] && page.originals[kept.OTHER + ':2'], 'their reposted and quoted originals stay')
+  t.ok(page.names.some((n) => n.author === kept.OTHER), 'their name stays')
+
+  const blocked = await dropRun(true)
+  t.is(blocked.saved.length, 1, 'one save')
+  const cut = blocked.saved[0].body.authors
+  t.alike(Object.keys(cut), [FOLLOW], 'the blocked author\'s own page goes')
+  t.absent(cut[FOLLOW].items.some((i) => i.kind === 'repost' && i.to.author === blocked.OTHER), 'their repost goes from the other page')
+  t.alike(Object.keys(cut[FOLLOW].originals), [], 'and their originals')
+  t.absent(cut[FOLLOW].names.some((n) => n.author === blocked.OTHER), 'and their name')
 })
 
 test('membro snapshot: page rows and seeded paging', (t) => {

@@ -3358,7 +3358,9 @@ export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollF
   const renderItem = useCallback(({ item }) => {
     let row
     if (item.kind === 'comentarios') {
-      row = foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, strangerPersist: 'copy' })
+      // No forced persist: a fold root may be a stranger's post, whose photos
+      // the live list kept in the copy kinds. 'copy' reads the main kind first.
+      row = foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, strangerPersist: 'copy' })
     } else if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }

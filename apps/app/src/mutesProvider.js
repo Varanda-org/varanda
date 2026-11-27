@@ -150,7 +150,9 @@ export function MutesProvider ({ children, bindingOf }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
-      reportMutes([...next])
+      // One key over a list never read whole this run would replace the
+      // worker's whole list; the next whole read reports it with this key.
+      if (listedRef.current) reportMutes([...next])
       if (listedRef.current && trustedRef.current) saveQuietList('silenciados', bindingRef.current, next)
       setChanged((n) => n + 1)
       return r

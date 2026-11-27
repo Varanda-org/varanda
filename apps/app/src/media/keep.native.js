@@ -296,14 +296,15 @@ function feasible (p, size) {
   return files + 1 <= p.maxFiles && bytes + size <= p.maxBytes
 }
 
-// After a new file joined the tally: trims the oldest files not protected
-// (the new one is in use) back under the caps, with room to spare.
-function settle (p) {
+// After a new file (key) joined the tally: trims the oldest files not
+// protected, and never that one, back under the caps, with room to spare.
+function settle (p, key) {
   if (p.tally.size <= p.maxFiles && p.bytes <= p.maxBytes) return
   trim(
     p,
     Math.max(0, p.maxBytes - Math.floor(p.maxBytes / SLACK)),
-    Math.max(0, p.maxFiles - Math.floor(p.maxFiles / SLACK))
+    Math.max(0, p.maxFiles - Math.floor(p.maxFiles / SLACK)),
+    key
   )
 }
 
@@ -327,8 +328,9 @@ export function keep (kind, author, d, bytes, { replace = false } = {}) {
   }
 }
 
-// keep() once the name and bytes were checked.
-function write (kind, name, bytes, replace) {
+// keep() once the name and bytes were checked. mark: the URI is handed out
+// to be shown, so it is in use until released.
+function write (kind, name, bytes, replace, mark = true) {
   let tmp = null
   let putBack = null
   try {
@@ -342,7 +344,7 @@ function write (kind, name, bytes, replace) {
     const swap = replace && dest.exists
     if (!swap && dest.exists) {
       if (dest.size === size) {
-        markUsed(key)
+        if (mark) markUsed(key)
         count(key, size)
         return dest.uri
       }
@@ -365,9 +367,9 @@ function write (kind, name, bytes, replace) {
     tmp = null
     putBack = null
     if (swap) remove(new File(dir, name + OLD))
-    markUsed(key)
+    if (mark) markUsed(key)
     count(key, size)
-    try { settle(p) } catch {}
+    try { settle(p, key) } catch {}
     return new File(dir, name).uri
   } catch {
     if (tmp !== null) remove(tmp)
@@ -406,13 +408,15 @@ export function keptGroupThumb (author, sha) {
 }
 
 // Keeps a decrypted group picture under the copy pool's caps. -> its URI or
-// null. The caller decides who may be kept and checked the hash.
+// null. The caller decides who may be kept and checked the hash. Nothing
+// shows this URI (the live picture comes from the node), so it is not marked
+// in use: only keptGroupThumb's URI is, until releaseKept.
 export function keepGroupThumb (author, sha, bytes, mime) {
   try {
     const base = thumbParts(author, sha)
     if (base === null || mime !== THUMB_MIME || !(bytes instanceof Uint8Array)) return null
     if (bytes.byteLength < 1 || bytes.byteLength > KEEP_GROUP_THUMB_MAX_BYTES) return null
-    return write(THUMBS, base + '.' + EXT[mime], bytes, false)
+    return write(THUMBS, base + '.' + EXT[mime], bytes, false, false)
   } catch {
     return null
   }
@@ -553,7 +557,7 @@ function liveExists (k) {
 // files older than KEEP_MAX_AGE_MS, then the oldest files (by modification time) until both caps hold, skipping files
 // in use or released less than KEEP_RELEASE_GRACE_MS ago; rebuilds the
 // tally from what is really left (a failed delete still counts).
-function trim (p, bytesCap, filesCap) {
+function trim (p, bytesCap, filesCap, spare = null) {
   const now = Date.now()
   // A replace interrupted after the old file moved aside: it goes back
   // under its name, so a crash never costs the kept copy. Nothing marked it
@@ -583,7 +587,7 @@ function trim (p, bytesCap, filesCap) {
       size = k.file.size || 0
       time = k.file.modificationTime || 0
     } catch {}
-    const used = protectedKey(k.key, now) || restored.has(k.key)
+    const used = protectedKey(k.key, now) || restored.has(k.key) || k.key === spare
     // An unreadable time (0) is not read as very old.
     if (!used && time > 0 && now - time > p.maxAge && remove(k.file)) continue
     kept.push({ key: k.key, file: k.file, size, time, used })

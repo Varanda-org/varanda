@@ -44,7 +44,7 @@ async function avatarUI ({ keptOnly = false, keptHit = null, distinct = false, r
   const groupImage = await import('../src/groupImage.js')
   const bytes = jpeg(512, 512)
   const io = deps(respond ? () => respond(bytes) : response(bytes))
-  const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [], forgets: [], drops: [], persist: [], thumbKept: [], thumbKeeps: [], readFiles: [], revoked: [] }
+  const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [], forgets: [], drops: [], persist: [], thumbKept: [], thumbKeeps: [], thumbReleases: [], readFiles: [], revoked: [] }
   const display = {
     revokeUrl (url) { calls.revoked.push(url) },
     urlFromBytes (...args) {
@@ -196,7 +196,8 @@ async function avatarUI ({ keptOnly = false, keptHit = null, distinct = false, r
       keepGroupThumb (author, sha, bytes, mime) {
         calls.thumbKeeps.push({ author, sha, bytes: Array.from(bytes), mime })
         return null
-      }
+      },
+      releaseKept (uri) { calls.thumbReleases.push(uri) }
     },
     '../media/reportAudio': {
       async readReportAudio (uri) {
@@ -1357,4 +1358,98 @@ test('Avatar group thumbs: a kept picture first asked before the block list is k
   const tree = ui.renderNow(props)
   t.is(tree.props.children[1] && tree.props.children[1].props.source.uri, 'blob:test/image/jpeg', 'drawn once the list is known')
   t.is(ui.calls.thumbKept.length, 1)
+})
+
+test('Avatar group thumbs: a web hit keeps a picture its first decrypt could not, and only with a keeper', async (t) => {
+  const bytes = jpeg(512, 512)
+  let allowed = false
+  const ui = await avatarUI({
+    read: () => ({ bytes: bytes.slice(), mime: 'image/jpeg' }),
+    thumbs: { allowed: () => allowed, readFile: () => bytes.slice() }
+  })
+  const item = thumbItem(bytes)
+  const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: item, keepGroupThumb: true }
+  await ui.render(props)
+  await ui.flush()
+  t.alike(ui.calls.thumbKeeps, [], 'the decrypt came before the block list allowed a keep')
+  allowed = true
+  ui.remount()
+  await ui.render({ ...props, keepGroupThumb: false })
+  await ui.flush()
+  t.alike(ui.calls.readFiles, [], 'a hit with no keeper reads nothing')
+  ui.remount()
+  const tree = await ui.render(props)
+  await ui.flush()
+  t.is(tree.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+  t.alike(ui.calls.readFiles, ['blob:test/image/jpeg'], 'the hit reads its blob: URL back')
+  t.alike(ui.calls.thumbKeeps, [{ author: AUTHOR, sha: item.plainSha256, bytes: Array.from(bytes), mime: 'image/jpeg' }])
+  t.is(ui.calls.reads.length, 1, 'with no second node read')
+  ui.remount()
+  await ui.render(props)
+  await ui.flush()
+  t.is(ui.calls.readFiles.length, 1, 'a pair kept in this run is not read again')
+})
+
+test('Avatar group thumbs: a native hit reads no file for a picture the keep would refuse', async (t) => {
+  const bytes = jpeg(512, 512)
+  const caches = await import('../src/localCaches.js')
+  const uri = 'file:///data/cache/varanda-read/thumb.jpg'
+  const cases = [
+    { why: 'blocked author', allowed: () => false },
+    { why: 'unknown block list', allowed: caches.groupThumbKeepAllowed },
+    { why: 'a 256x256 picture', w: 256, h: 256, item: thumbItem(jpeg(256, 256)) },
+    { why: 'a 512x256 picture', w: 512, h: 256 }
+  ]
+  for (const c of cases) {
+    const ui = await avatarUI({
+      read: () => ({ uri, mime: 'image/jpeg', w: c.w || 512, h: c.h || 512 }),
+      thumbs: { readFile: () => bytes.slice(), allowed: c.allowed }
+    })
+    const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: c.item || thumbItem(bytes), keepGroupThumb: true }
+    await ui.render(props)
+    await ui.flush()
+    t.is(ui.calls.readFiles.length, 1, c.why + ': the decrypt offered its file')
+    ui.remount()
+    await ui.render(props)
+    await ui.flush()
+    t.is(ui.calls.readFiles.length, 1, c.why + ': the hit reads nothing')
+    t.alike(ui.calls.thumbKeeps, [], c.why + ': nothing kept')
+  }
+  let allowed = false
+  const ui = await avatarUI({
+    read: () => ({ uri, mime: 'image/jpeg', w: 512, h: 512 }),
+    thumbs: { readFile: () => bytes.slice(), allowed: () => allowed }
+  })
+  const item = thumbItem(bytes)
+  const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: item, keepGroupThumb: true }
+  await ui.render(props)
+  await ui.flush()
+  allowed = true
+  ui.remount()
+  await ui.render(props)
+  await ui.flush()
+  t.alike(ui.calls.readFiles, [uri, uri], 'an eligible hit reads once')
+  t.alike(ui.calls.thumbKeeps, [{ author: AUTHOR, sha: item.plainSha256, bytes: Array.from(bytes), mime: 'image/jpeg' }], 'and keeps')
+})
+
+test('Avatar group thumbs: native releases a kept picture when the row lets it go', async (t) => {
+  const bytes = jpeg(512, 512)
+  const item = thumbItem(bytes)
+  const other = { ...item, plainSha256: '77'.repeat(32) }
+  const uriOf = (author, sha) => 'file:///keep/copyGroupThumbs/' + author + '-' + sha + '.jpg'
+  const ui = await avatarUI({ thumbs: { kept: uriOf } })
+  const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, groupThumb: { author: AUTHOR, sha: item.plainSha256 } }
+  const tree = await ui.render(props)
+  const first = uriOf(AUTHOR, item.plainSha256)
+  t.is(tree.props.children[1].props.source.uri, first)
+  t.alike(ui.calls.thumbReleases, [], 'held while shown')
+  await ui.render({ ...props, groupThumb: { author: AUTHOR, sha: other.plainSha256 } })
+  t.alike(ui.calls.thumbReleases, [first], 'a change of pair releases the old URI')
+  ui.unmount()
+  t.alike(ui.calls.thumbReleases, [first, uriOf(AUTHOR, other.plainSha256)], 'an unmount releases the shown one')
+  const web = await avatarUI({ thumbs: { kept: async () => bytes.slice() } })
+  await web.render(props)
+  web.unmount()
+  t.alike(web.calls.thumbReleases, [], 'the web revokes its blob: URL instead')
+  t.alike(web.calls.revoked, ['blob:test/image/jpeg'])
 })

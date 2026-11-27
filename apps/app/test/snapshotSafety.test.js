@@ -152,12 +152,12 @@ test('the quiet lists are saved only behind mayStoreQuietLists, and only after a
   const reload = BLOCKS.slice(BLOCKS.indexOf('const reload = useCallback'), BLOCKS.indexOf('const setBlock = useCallback'))
   t.ok(/const listed = Boolean\(answer && Array\.isArray\(answer\.keys\)\)[\s\S]*?listedRef\.current = listed\s*trustedRef\.current = listed\s*if \(listed\) saveQuietList\('bloqueios', bindingRef\.current, keysRef\.current\)/.test(reload), 'after a whole list read of a key array')
   const setBlock = BLOCKS.slice(BLOCKS.indexOf('const setBlock = useCallback'), BLOCKS.indexOf('const refresh = useCallback'))
-  t.ok(/commit\(next\)\s*reportBlocks\(\[\.\.\.next\]\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, next\)/.test(setBlock), 'a set over a stored or malformed list saves nothing')
+  t.ok(/commit\(next\)(?:\s*\/\/[^\n]*)*\s*if \(listedRef\.current\) reportBlocks\(\[\.\.\.next\]\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, next\)/.test(setBlock), 'a set over a stored or malformed list saves nothing')
   t.ok(/if \(mayStore && listedRef\.current && trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, keysRef\.current\)\s*\}, \[mayStore, bindingKey\]\)/.test(BLOCKS), 'again once storing is allowed')
   const mutes = withoutComments(read('src/mutesProvider.js'))
   t.is(mutes.split('saveScreenSnapshot(').length - 1, 0, 'mutesProvider saves through saveQuietList only')
   t.ok(/if \(wipeEpoch\(\) !== wiped\) return reload\(alive\)\s*commit\(mutedSetOf\(answer\)\)[\s\S]*?const listed = Boolean\(answer && Array\.isArray\(answer\.keys\)\)\s*if \(listed\) reportMutes\(\[\.\.\.keysRef\.current\]\)\s*listedRef\.current = listed\s*trustedRef\.current = listed\s*if \(listed\) saveQuietList\('silenciados', bindingRef\.current, keysRef\.current\)/.test(mutes), 'never an answer asked before a wipe')
-  t.ok(/commit\(next\)\s*reportMutes\(\[\.\.\.next\]\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('silenciados', bindingRef\.current, next\)/.test(mutes))
+  t.ok(/commit\(next\)(?:\s*\/\/[^\n]*)*\s*if \(listedRef\.current\) reportMutes\(\[\.\.\.next\]\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('silenciados', bindingRef\.current, next\)/.test(mutes))
 })
 
 test('snapshot rows: a failed block list leaves only the own rows', (t) => {

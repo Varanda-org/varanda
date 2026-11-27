@@ -513,7 +513,7 @@ test('noticesForStorage keeps the picture the row draws, and the save arms again
   t.ok(section('const cancelSave = useCallback(', '\n  }, [').includes('armedSaveRef.current = null'), 'a cancelled save is not armed')
   t.ok(source.includes("picture={picture} persist={persistCopy ? 'copy' : false}"), 'a member row keeps bytes from the copy store')
   t.ok(source.includes('armSave(armed.gen, armed.b)'), 'the save is re-armed when avatars change')
-  t.ok(source.includes('}, [avatars, armSave])'))
+  t.ok(source.includes('}, [avatars, profileOf, armSave])'), 'and when the names cache answers anew')
   t.ok(source.indexOf('const avatars = useRowAvatars') < source.indexOf('armSave(armed.gen, armed.b)'))
 })
 
@@ -578,9 +578,41 @@ async function saveHarness () {
   env.armSave = screenHandler('armSave', env)
   h.env = env
   const head = 'useEffect(() => {\n    const armed = armedSaveRef.current'
-  h.effect = evaluate('() => {' + head.slice(head.indexOf('\n')) + section(head, '\n  }, [avatars, armSave])') + '\n}', env)
+  h.effect = evaluate('() => {' + head.slice(head.indexOf('\n')) + section(head, '\n  }, [') + '\n}', env)
+  // As React runs it: again only when an entry of its own dependency list
+  // (read from the screen) changed identity.
+  const deps = section(head + section(head, '\n  }, [') + '\n  }, [', '])')
+  let last = null
+  h.render = (scope) => {
+    const next = evaluate('[' + deps + ']', scope)
+    if (last !== null && next.length === last.length && next.every((d, i) => Object.is(d, last[i]))) return
+    last = next
+    h.effect()
+  }
   return h
 }
+
+test('a names-cache picture that settles after the save saves again with it; the same answer does not', async (t) => {
+  const h = await saveHarness()
+  const avatars = {}
+  const render = (profileOf) => {
+    h.env.profileOfRef.current = profileOf
+    h.render({ avatars, profileOf, armSave: h.env.armSave })
+  }
+  render(() => undefined)
+  h.env.armSave(10, binding)
+  h.tick(2000)
+  t.is(h.saves.length, 1)
+  t.is(h.saves[0].notices[0].avatar, null, 'saved before the names cache knew the picture')
+  render((k) => (k === PEER ? { name: 'Pessoa', username: null, avatar: AVATAR } : undefined))
+  t.is(h.pending(), 1, 'armed again')
+  h.tick(2000)
+  t.alike(h.saves.map((s) => s.notices.map((n) => n.avatar)), [[null, null], [AVATAR, AVATAR]], 'the second save carries the names-cache picture')
+  render((k) => (k === PEER ? { name: 'Pessoa', username: null, avatar: AVATAR } : undefined))
+  t.is(h.pending(), 0, 'a new profileOf with the same answer: no timer')
+  h.tick(10000)
+  t.is(h.saves.length, 2, 'not written again')
+})
 
 test('a cancelled save stays cancelled when a peek lands', async (t) => {
   const h = await saveHarness()

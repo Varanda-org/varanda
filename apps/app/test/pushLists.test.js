@@ -144,7 +144,7 @@ test('a throwing worker or a ready that rejects is harmless', async (t) => {
   await tick()
 })
 
-test('a clear that may not have reached the worker is sent again on each page load until an account opens', async (t) => {
+test('a clear that may not have reached the worker is sent again on each page load until the open account reports both lists', async (t) => {
   const items = setStorage(t)
   setNavigator(t, {})
   const leaving = await freshWeb()
@@ -168,10 +168,44 @@ test('a clear that may not have reached the worker is sent again on each page lo
   t.is(items.get(OWED), '1', 'sending is no proof the worker kept it')
 
   call(again.openPushLists)
-  t.absent(items.has(OWED), 'an open account reports its own lists from here on')
+  again.reportBlocks([K])
+  again.reportMutes([M])
+  t.absent(items.has(OWED), 'the open account\'s own lists replaced the old ones')
   sent.length = 0
   await freshWeb()
-  t.alike(sent, [], 'no clear once an account opened')
+  t.alike(sent, [], 'no clear once they did')
+})
+
+test('opening is not enough: the clear stays owed until both lists of the open account were reported', async (t) => {
+  const items = setStorage(t)
+  const sent = controlled(t)
+  const leaving = await freshWeb()
+  call(leaving.clearPushLists)
+  call(leaving.openPushLists)
+  t.is(items.get(OWED), '1', 'opened, with no list read yet')
+  leaving.reportBlocks([K])
+  t.is(items.get(OWED), '1', 'the mutes list of the old account may still be there')
+
+  sent.length = 0
+  const reload = await freshWeb()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'the next load sends the clear again')
+  call(reload.openPushLists)
+  reload.reportMutes([M])
+  t.is(items.get(OWED), '1', 'a load starts over: one list is not both')
+  reload.reportBlocks([K])
+  t.absent(items.has(OWED), 'both lists reported')
+
+  call(reload.clearPushLists)
+  call(reload.openPushLists)
+  reload.reportBlocks([K])
+  t.is(items.get(OWED), '1', 'a later clear starts the count over')
+  reload.reportMutes([M])
+  t.absent(items.has(OWED), 'and both lists settle it again')
+
+  call(reload.clearPushLists)
+  reload.reportBlocks([K])
+  reload.reportMutes([M])
+  t.is(items.get(OWED), '1', 'reports with the gate closed never settle it')
 })
 
 test('a report that waits for the worker on a page load still beats the owed clear', async (t) => {

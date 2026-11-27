@@ -97,7 +97,7 @@ import { useMoments, useMomentSeen } from './Momentos'
 import { ABOUT_LABEL, MEMBER_SHORTCUTS, aboutEntry, aboutHint, avatarMoments, shortcutList } from '../profileSlim.js'
 import { AboutLink, AboutSheet } from '../ui/ProfileAbout'
 import { ProfileShortcuts } from '../ui/ProfileShortcuts'
-import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
+import { buildScreenSnapshot, screenKeepOnlyAuthors, screenWithoutAuthors } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { cacheGeneration } from '../localCaches'
@@ -510,8 +510,11 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   }, [author, ownKey])
 
   // An unfollow or a block here removes the author's entry at once. Acting
-  // as a page the member's snapshot cannot be read, so it all goes.
-  const dropSnapshotEntry = useCallback(() => {
+  // as a page the member's snapshot cannot be read, so it all goes. Only a
+  // block (`block`) also takes the author out of the other kept pages: after
+  // an unfollow they stay there as a repost or quote original and a name, as
+  // on a follow-list change.
+  const dropSnapshotEntry = useCallback((block) => {
     clearTimeout(saveTimerRef.current)
     saveTimerRef.current = null
     const at = snapRef.current
@@ -524,7 +527,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     }
     const snapshot = loadScreenSnapshot('membro', { ...binding, acting })
     if (snapshot === null || !Object.prototype.hasOwnProperty.call(snapshot.body.authors, author)) return
-    const next = screenWithoutAuthors(snapshot, [author])
+    const next = block === true
+      ? screenWithoutAuthors(snapshot, [author])
+      : screenKeepOnlyAuthors(snapshot, Object.keys(snapshot.body.authors).filter((a) => a !== author))
     if (next === null || Object.keys(next.body.authors).length === 0 || !saveScreenSnapshot('membro', next, cacheGeneration())) clearScreenSnapshot('membro')
   }, [author, ownKey])
   useEffect(() => () => clearTimeout(saveTimerRef.current), [])
@@ -961,7 +966,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     if (postsRef.current.seeded) commit({ ...INITIAL_POSTS })
   }, [node.config, ownKey, commit, commitHeader])
   useEffect(() => {
-    if (blockedHere) dropSnapshotEntry()
+    if (blockedHere) dropSnapshotEntry(true)
   }, [blockedHere, dropSnapshotEntry])
   const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
   useEffect(() => {
@@ -1044,7 +1049,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     try {
       await request(on ? 'follow.add' : 'follow.remove', { key: author })
       mark(author, on)
-      if (!on) dropSnapshotEntry()
+      if (!on) dropSnapshotEntry(false)
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))

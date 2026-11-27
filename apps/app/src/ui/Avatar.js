@@ -278,13 +278,16 @@ export async function keepGroupThumbBytes ({ author, sha, bytes, mime, w, h }, d
 
 const thumbSubtle = () => mediaHashDeps().subtle || (typeof crypto !== 'undefined' && crypto.subtle) || null
 
-// -> the keeper chatMedia's sourceFor offers the plaintext to, or null when
-// this picture needs none.
+// -> { keep, check }: the keeper chatMedia's sourceFor offers the plaintext
+// to, and the test it runs before reading a picture back on a hit (no read
+// for a picture keep would refuse); or null when this picture needs none.
 function groupThumbKeeper (author, sha) {
   if (typeof author !== 'string' || !HEX64.test(author) || typeof sha !== 'string' || !HEX64.test(sha)) return null
   const pair = author + '-' + sha
   if (thumbKeptBefore(pair, cacheGeneration())) return null
-  return (bytes, mime, w, h) => {
+  const check = (mime, w, h) => mime === GROUP_THUMB_MIME && w === GROUP_THUMB_SIDE && h === GROUP_THUMB_SIDE &&
+    groupThumbKeepAllowed(author) === true && !thumbKeptBefore(pair, cacheGeneration())
+  const keep = (bytes, mime, w, h) => {
     keepGroupThumbBytes({ author, sha, bytes, mime, w, h }, {
       allowed: groupThumbKeepAllowed,
       keep: keptStore.keepGroupThumb,
@@ -296,6 +299,26 @@ function groupThumbKeeper (author, sha) {
       if (thumbsKept.size > THUMBS_KEPT_MAX) thumbsKept.delete(thumbsKept.values().next().value)
     })
   }
+  return { keep, check }
+}
+
+// Native: kept picture URI -> the rows showing it. The store protects a URI
+// it handed out from a trim until it is released, so the last row to let
+// go releases it.
+const thumbHolds = new Map()
+
+function holdThumb (uri) {
+  thumbHolds.set(uri, (thumbHolds.get(uri) || 0) + 1)
+}
+
+function letGoThumb (uri) {
+  const n = (thumbHolds.get(uri) || 1) - 1
+  if (n > 0) {
+    thumbHolds.set(uri, n)
+    return
+  }
+  thumbHolds.delete(uri)
+  try { keptStore.releaseKept(uri) } catch {}
 }
 
 // The kept decrypted picture for a valid groupThumb, or null: a file URI on
@@ -316,11 +339,14 @@ function useKeptGroupThumb (thumb) {
     }
     let alive = true
     let made = null
+    let held = null
     let got = null
     try {
       got = keptStore.keptGroupThumb(author, sha)
     } catch {}
     if (typeof got === 'string') {
+      held = got
+      holdThumb(got)
       if (isShownUrl(got)) setResult({ author, sha, url: got })
     } else if (got && typeof got.then === 'function') {
       got.then((bytes) => {
@@ -339,6 +365,7 @@ function useKeptGroupThumb (thumb) {
     return () => {
       alive = false
       if (made !== null) revokeUrl(made)
+      if (held !== null) letGoThumb(held)
     }
   }, [author, sha, readable])
   return readable && result !== null && result.author === author && result.sha === sha ? result.url : null
@@ -380,8 +407,8 @@ function usePrivateAvatarUrl (mediaAuthor, item, keepThumb) {
     let alive = true
     let timer = null
     const fetchDeps = { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) }
-    const keep = keeping ? groupThumbKeeper(mediaAuthor, item.plainSha256) : null
-    const keepDeps = keep !== null ? { keep, readFile: readLocalBytes } : {}
+    const keeper = keeping ? groupThumbKeeper(mediaAuthor, item.plainSha256) : null
+    const keepDeps = keeper !== null ? { keep: keeper.keep, keepCheck: keeper.check, readFile: readLocalBytes } : {}
     sourceFor(ref, { node, identity, display, fetchDeps, ...keepDeps }).then((entry) => {
       if (!alive) return
       setResult({ key, attempt, node, entry })

@@ -38,7 +38,10 @@
 // (see sourceFor), with the size it was measured at: a copy of the plaintext
 // the keeper owns, which must check the hash and the size itself. The key, nonce and core never reach it. On the web the copy
 // is taken before the wipe; on native the node's file is read with
-// ctx.readFile(uri) only when a keeper was asked for.
+// ctx.readFile(uri) only when a keeper was asked for. A hit, or a load joined
+// from another caller, reads its local URI back (the file, or the blob: URL
+// on the web) only once ctx.keepCheck(mime, w, h) says the keeper would take
+// it, so a picture it refuses costs no read.
 
 import rpc from '@varanda/rpc'
 import { createMediaCache, mediaKey } from './cache.js'
@@ -208,10 +211,26 @@ function offer (keeper, bytes, mime, w, h) {
   }
 }
 
-// Reads a node file for the keeper. Never rejects: a file already forgotten
-// keeps nothing.
-async function offerFile (keeper, uri, mime, w, h) {
-  if (keeper === null || typeof keeper.readFile !== 'function' || readFileName(uri) === null || mime === AUDIO_MIME) return
+// Whether the keeper would take a picture of this type and size; no check
+// counts as no.
+function wanted (keeper, mime, w, h) {
+  if (typeof keeper.check !== 'function') return false
+  try {
+    return keeper.check(mime, w, h) === true
+  } catch {
+    return false
+  }
+}
+
+// A node file, or a blob: URL this module made (the web has no bytes left
+// on a hit).
+const localUri = (uri) => readFileName(uri) !== null || (typeof uri === 'string' && uri.startsWith('blob:'))
+
+// Reads a local URI for the keeper; checked: only once keeper.check passes.
+// Never rejects: a file already forgotten keeps nothing.
+async function offerFile (keeper, uri, mime, w, h, checked = false) {
+  if (keeper === null || typeof keeper.readFile !== 'function' || !localUri(uri) || mime === AUDIO_MIME) return
+  if (checked && !wanted(keeper, mime, w, h)) return
   let bytes
   try {
     bytes = await keeper.readFile(uri)
@@ -237,10 +256,15 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
   let epoch = 0
   let owner = null
 
+  // URLs whose own load had a keeper: a caller that joins it is not offered
+  // the same picture again.
+  const offered = new Set()
+
   const release = (url) => {
     const fn = releases.get(url)
     releases.delete(url)
     entries.delete(url)
+    offered.delete(url)
     if (typeof fn === 'function') {
       try { fn() } catch {}
     }
@@ -381,8 +405,9 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
   // -> { uri, mime, w, h } or { unavailable: true } (retryable: true when a
   // node read or a public fetch may succeed later). Never rejects.
   // ref: { kind: 'dm', from, id, index, page?, item? } or { kind: 'group', diary, item }.
-  // ctx: { node, identity, display, fetchDeps?, keep?, readFile? }. keep and
-  // readFile reach only a private group item, on a read and on a native hit.
+  // ctx: { node, identity, display, fetchDeps?, keep?, keepCheck?, readFile? }.
+  // keep, keepCheck and readFile reach only a private group item: on a read,
+  // and on a hit or a joined load once keepCheck passes.
   const sourceFor = async (ref, ctx = {}) => {
     try {
       if (!ref || typeof ref !== 'object') return UNAVAILABLE
@@ -395,13 +420,13 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
       const started = epoch
       const key = started + '|' + base
       const keeper = ref.kind === 'group' && isPrivateGroupItem(ref.item) && typeof ctx.keep === 'function'
-        ? { keep: ctx.keep, readFile: typeof ctx.readFile === 'function' ? ctx.readFile : null, live: () => epoch === started }
+        ? { keep: ctx.keep, check: ctx.keepCheck, readFile: typeof ctx.readFile === 'function' ? ctx.readFile : null, live: () => epoch === started }
         : null
       const hit = cache.peek(key)
       if (hit !== null) {
         const found = entries.get(hit)
-        // Not awaited: the hit draws at once. A web hit has no bytes left.
-        if (found && keeper !== null) offerFile(keeper, hit, found.mime, found.w, found.h)
+        // Not awaited: the hit draws at once.
+        if (found && keeper !== null) offerFile(keeper, hit, found.mime, found.w, found.h, true)
         return found || UNAVAILABLE
       }
       // A forward asks the cache first and reads fresh bytes itself on a
@@ -413,7 +438,9 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
       if (!publicItem) hosts.add(media)
       const display = ctx.display || null
       const want = expectedMime(ref)
+      let ran = false
       const entry = await cache.get(key, async () => {
+        ran = true
         // Queued before a clear or a switch: never start the stale read.
         if (epoch !== started) throw goneError()
         const out = publicItem
@@ -425,6 +452,7 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
           release(out.uri)
           throw goneError()
         }
+        if (keeper !== null) offered.add(out.uri)
         return out.uri
       })
       // Cleared between the load and the store: the entry is not kept.
@@ -432,7 +460,11 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
         release(entry)
         return UNAVAILABLE
       }
-      return entries.get(entry) || UNAVAILABLE
+      const found = entries.get(entry)
+      // Joined another caller's load, which had no keeper (a Grupo header):
+      // this one reads the picture back as on a hit.
+      if (found && !ran && keeper !== null && !offered.has(entry)) offerFile(keeper, entry, found.mime, found.w, found.h, true)
+      return found || UNAVAILABLE
     } catch (err) {
       return unavailable(err && err.retryable)
     }

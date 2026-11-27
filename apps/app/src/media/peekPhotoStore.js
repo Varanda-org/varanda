@@ -14,7 +14,8 @@
 // mutation (bind, wipe, drop, retain) bumps an epoch the moment it is called,
 // and a put or read re-checks it after every await, so a put still in flight
 // never writes back what a later wipe, drop or retain removed, and a read in
-// flight never answers for a binding that has gone.
+// flight never answers for a binding that has gone. A retainThumbs cancels
+// only the puts and reads of the group pictures it deletes.
 //
 // Nothing here throws or rejects: a backend failure answers null or false,
 // and the caller falls back to the network.
@@ -154,16 +155,17 @@ export function createPeekPhotoStore ({
     return run
   }
 
-  const live = (at) => at === epoch
-  // epoch -> the names the retainThumbs that bumped to it keeps. A put that
-  // only such retains overtook, each naming it, still lands: the retain runs
-  // after it in the queue and keeps it.
+  // epoch -> whether the retainThumbs that bumped to it leaves a name alone
+  // (every name but the group pictures it does not name). A put or read that
+  // only such retains overtook, each sparing its name, still runs: the
+  // retain runs after it in the queue and deletes none of it, so a copy
+  // photo or a named group picture is not lost to a Conversas prune.
   const spared = new Map()
   const SPARED_MAX = 64
   function survives (at, name) {
     for (let e = at + 1; e <= epoch; e++) {
-      const keep = spared.get(e)
-      if (keep === undefined || !keep.has(name)) return false
+      const spares = spared.get(e)
+      if (spares === undefined || !spares(name)) return false
     }
     return true
   }
@@ -229,9 +231,9 @@ export function createPeekPhotoStore ({
   function readName (name, matches) {
     const at = epoch
     return enqueue(async () => {
-      if (name === null || ready === null || !live(at)) return null
+      if (name === null || ready === null || !survives(at, name)) return null
       const row = (await rows()).find((r) => r && r.name === name)
-      if (!live(at) || row === undefined) return null
+      if (!survives(at, name) || row === undefined) return null
       const fits = valid(row) && matches(row) && !tooOld(row, now())
       if (!fits) {
         await removeNames([name])
@@ -239,7 +241,7 @@ export function createPeekPhotoStore ({
       }
       const bytes = await backend.get(name, readyBinding)
       // Rebound by another tab: not this account's entry to remove.
-      if (!live(at) || bytes === false) return null
+      if (!survives(at, name) || bytes === false) return null
       if (!(bytes instanceof Uint8Array) || bytes.length !== row.size) {
         await removeNames([name])
         return null
@@ -379,7 +381,7 @@ export function createPeekPhotoStore ({
       if (name !== null) keep.add(name)
     }
     const run = removeWhere((row) => !valid(row) ? true : row.kind === COPY_GROUP_THUMBS && !keep.has(row.name))
-    spared.set(epoch, keep)
+    spared.set(epoch, (name) => !name.startsWith(COPY_GROUP_THUMBS + '/') || keep.has(name))
     if (spared.size > SPARED_MAX) spared.delete(spared.keys().next().value)
     return run
   }

@@ -362,10 +362,43 @@ test('the cold-start preview draws the more line of its fold rows as live does',
   t.is(p.onOpenPreviews, undefined, 'and no tap: the preview sends nothing')
   const view2 = textOf(code, 'foldRowView')
   t.ok(view2.includes('socialRowProps(') && view2.includes('fold: item'), 'the preview fold rows go through the same props')
-  t.ok(preview.includes("foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, strangerPersist: 'copy' })"), 'the preview renders its fold rows that way, strangers from the copy store')
+  t.ok(preview.includes("foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, strangerPersist: 'copy' })"), 'the preview renders its fold rows that way, strangers from the copy store')
   t.ok(view2.includes('fold: item, strangerPersist })'), 'the fold row hands its stranger persist on')
   t.ok(member.includes("foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, strangerPersist: 'copy' })"), 'the member\'s fold rows read stranger copies')
   t.ok(page.includes('foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache })'), 'the page\'s fold rows pass none')
+})
+
+// foldRowView compiled from its text, its two JSX returns turned into the
+// props and null.
+async function compileFoldRowView () {
+  const socialRowProps = await compileRowProps()
+  const body = fnText(code, 'foldRowView')
+    .replace(/return <RepostPlaceholder [^\n]*\/>/, 'return null')
+    .replace('return <PostRow {...socialRowProps(', 'return socialRowProps(')
+    .replace(/\)\} \/>\n\}$/, ')\n}')
+  // eslint-disable-next-line no-new-func
+  return new Function('socialRowProps', 'previewName', body + '\nreturn foldRowView')(socialRowProps, () => '')
+}
+
+test('the cold-start preview\'s fold rows read a stranger root\'s photos from the copy store', async (t) => {
+  const foldRowView = await compileFoldRowView()
+  const call = /foldRowView\(item, (\{[^\n]*\})\)\n/.exec(preview)
+  t.ok(call, 'the preview\'s fold row call')
+  if (!call) return
+  // eslint-disable-next-line no-new-func
+  const optsOf = new Function('view', 'now', 'ownKey', 'PREVIEW_HANDLERS', 'return ' + call[1])
+  const seed = { counts: new Map(), liked: new Set(), reposted: new Set(), originals: new Map() }
+  // eslint-disable-next-line no-new-func
+  const previewSocial = new Function('socialSeed', 'noop', fnText(code, 'previewSocial') + '\nreturn previewSocial')(() => seed, () => {})
+  const view = previewSocial({ names: {}, items: [] })
+  const root = post(C, 1, { media: [{}] })
+  const item = { kind: 'comentarios', state: 'ready', post: root, root: refOf(root), key: 'f:' + refOf(root), by: [{ author: B, name: 'Bia' }], lines: [], comments: [] }
+  const p = foldRowView(item, optsOf(view, 0, E, {}))
+  t.is(p.persistMedia, 'copy', 'a stranger root: main kind first, then the copy kind, never main only')
+  t.absent(/persist: true/.test(call[1]), 'never a forced persist: true')
+  // The live member list's fold row gets the same answer for a stranger.
+  const live = foldRowView(item, { social: { ...view, persistOf: () => false }, profileOf: view.profileOf, now: 0, ownKey: E, h: {}, strangerPersist: 'copy' })
+  t.is(live.persistMedia, 'copy', 'as A Rua\'s member list keeps it')
 })
 
 test('ingest reads the fold only when asked to, and wires foldRounds.js', (t) => {

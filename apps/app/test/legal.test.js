@@ -54,7 +54,7 @@ test('legal: version 113 describes the copies kept on the device', async (t) => 
     'o app guarda no aparelho, em texto aberto, a lista de Conversas com a prévia da última mensagem, as últimas mensagens das conversas privadas e dos grupos que você abriu (grupos privados e os nomes deles incluídos) e a lista de Avisos, por até 14 dias',
     'As chaves que abrem as fotos das mensagens privadas nunca são guardadas, então essas fotos voltam a ser carregadas do nó.',
     'Quem tiver o aparelho ou o perfil do navegador desbloqueado pode ler essas cópias.',
-    'O app as apaga ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e quando o app abre sem uma sessão aberta. Bloquear alguém tira dessas cópias as linhas dessa pessoa.',
+    'O app as apaga ao Sair, ao Recomeçar, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e quando o app abre sem uma sessão aberta. Bloquear alguém tira dessas cópias as linhas dessa pessoa.',
     'As cópias da Espiadinha no aparelho valem por até 7 dias; as cópias de Conversas, de Avisos, das listas, de A Rua, do Diário e dos perfis',
     'Listas no aparelho: para abrir mais rápido, o app guarda no aparelho a primeira página de algumas listas',
     'o texto público das primeiras 30 publicações da lista, como descrito em "Listas no aparelho".',
@@ -72,7 +72,7 @@ test('legal: version 115 describes the stored block lists and the copies of stra
   for (const statement of [
     'Bloqueios e silenciados no aparelho: em todas as plataformas, o app guarda no aparelho, em texto aberto, a lista das contas que você bloqueou e a lista das que você silenciou, até 500 chaves públicas cada, por até 14 dias',
     'O app só grava essas listas depois que você aceita estes documentos e enquanto a sessão está desbloqueada.',
-    'Essa cópia continua quando a sessão é bloqueada e é apagada ao Sair, ao apagar os dados do app e ao trocar de conta ou de instalação.',
+    'Essa cópia continua quando a sessão é bloqueada e é apagada ao Sair, ao Recomeçar, ao apagar os dados do app e ao trocar de conta ou de instalação.',
     'a última primeira página de A Rua, do seu Diário e dos perfis de até 8 pessoas que você segue, por até 14 dias.',
     'as publicações de quem você não segue que aparecem ali republicadas, citadas ou respondidas, e mais uma publicação citada ou respondida dentro delas, com o nome, o @nome e a referência da foto de perfil dessas contas.',
     'A cópia de Conversas guarda também o nome, o @nome e a referência da foto de perfil das pessoas das conversas guardadas, cada um por até 14 dias desde a última vez que o app o conferiu.',
@@ -81,7 +81,7 @@ test('legal: version 115 describes the stored block lists and the copies of stra
     'e as fotos abertas dos grupos privados, em todas as plataformas, por até 14 dias; as suas fotos e as de quem você segue guardadas na versão web, por até 30 dias;',
     'com limite próprio de 8 MiB e 200 arquivos, por até 14 dias.',
     'até 256 KiB cada, com nome feito de quem a enviou e do resumo da foto, nunca da chave do grupo',
-    'Essas fotos são apagadas ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e, na hora, quando você bloqueia a conta.',
+    'Essas fotos são apagadas ao Sair, ao Recomeçar, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e, na hora, quando você bloqueia a conta.',
     'com limite de 64 MiB e 2000 arquivos, por até 30 dias, e não ficam no cache próprio do navegador.',
     'essa renovação pode ler publicações de até 6 dessas pessoas, até 29 de cada uma',
     'o aparelho se conecta por alguns segundos a quem guarda esses diários na rede, como os semeadores, e nesse tempo também sincroniza os seus grupos.'
@@ -690,7 +690,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'fa7b9a0213909a736545685ae7974bb660ad404b04439917bb9b0aef20501b35', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '9e02a3426df272744fe4528d87ee59abd4e07a788a3d1321b9e905731543baa5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

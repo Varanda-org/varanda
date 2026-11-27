@@ -302,7 +302,9 @@ export function BlocksProvider ({ children, bindingOf }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
-      reportBlocks([...next])
+      // One key over a list never read whole this run would replace the
+      // worker's whole list; the next whole read reports it with this key.
+      if (listedRef.current) reportBlocks([...next])
       if (listedRef.current && trustedRef.current) saveQuietList('bloqueios', bindingRef.current, next)
       setChanged((n) => n + 1)
       return r

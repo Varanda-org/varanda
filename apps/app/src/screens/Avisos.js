@@ -1474,14 +1474,16 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const avatars = useRowAvatars(shownItems, profileOf, node.request, active && passkeyHosted && notice === null, avatarCycle)
   avatarsRef.current = avatars
   // A peek that lands after the page was armed is still the picture the copy
-  // keeps. A pending save reads the peek map when it fires, so it is not
-  // pushed back; after it, only a peek that changes the stored rows saves again.
+  // keeps, and so is a name or picture the names cache settles later (its
+  // profileOf changes with every commit). A pending save reads both when it
+  // fires, so it is not pushed back; after it, only an answer that changes
+  // the stored rows saves again.
   useEffect(() => {
     const armed = armedSaveRef.current
     if (armed === null || saveRef.current !== null) return
     if (armed.stored !== null && JSON.stringify(storedNotices(stateRef.current, heldRef.current, profileOfRef.current, avatarsRef.current)) === armed.stored) return
     armSave(armed.gen, armed.b)
-  }, [avatars, armSave])
+  }, [avatars, profileOf, armSave])
   const snippets = useSnippets(shownItems, node.request, active && passkeyHosted && notice === null, loadedAt)
   // The chips and day headers only change what is drawn: settle, the seen
   // marks and the badge always take the whole loaded list.

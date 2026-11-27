@@ -25,6 +25,8 @@ let open = false
 // Counts the reports of each type: a report still waiting for the worker is
 // dropped once a later one (or the clear) was made.
 const latest = { [BLOCKS]: 0, [MUTES]: 0 }
+// Which lists of the open account went to the worker since the last clear.
+const handed = { [BLOCKS]: false, [MUTES]: false }
 
 function sw () {
   try {
@@ -56,12 +58,19 @@ function report (type, keys) {
   }
 }
 
+function reportOpen (type, keys) {
+  if (!open) return
+  report(type, keys)
+  handed[type] = true
+  if (handed[BLOCKS] && handed[MUTES] && owed()) noteOwed(false)
+}
+
 export function reportBlocks (keys) {
-  if (open) report(BLOCKS, keys)
+  reportOpen(BLOCKS, keys)
 }
 
 export function reportMutes (keys) {
-  if (open) report(MUTES, keys)
+  reportOpen(MUTES, keys)
 }
 
 function noteOwed (on) {
@@ -89,6 +98,8 @@ function sendClear () {
 
 export function clearPushLists () {
   open = false
+  handed[BLOCKS] = false
+  handed[MUTES] = false
   noteOwed(true)
   sendClear()
 }
@@ -96,7 +107,6 @@ export function clearPushLists () {
 // The open account's providers report its own lists from here on.
 export function openPushLists () {
   open = true
-  noteOwed(false)
 }
 
 if (owed()) sendClear()

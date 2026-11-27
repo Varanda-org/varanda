@@ -588,3 +588,46 @@ test('the copy store: 14-day expiry, its own caps, and only retainThumbs prunes 
     t.is(backend.state.meta.size, 0, 'an empty list removes every group picture')
   }
 })
+
+test('a retainThumbs spares the queued puts and reads of what it keeps; a drop still cancels them', async (t) => {
+  {
+    const { store, backend } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    await store.putThumb(A, SHA, bytesOf(5), 'image/jpeg')
+    const photo = store.put('copyAvatars', B, desc(), bytesOf(4))
+    const post = store.put('copyPosts', A, desc({ start: 2 }), bytesOf(4))
+    const named = store.readThumb(B, SHA)
+    const unnamedPut = store.putThumb(A, SHA2, bytesOf(6), 'image/jpeg')
+    const unnamedRead = store.readThumb(A, SHA)
+    const retained = store.retainThumbs([{ author: B, sha: SHA }])
+    t.is(await photo, true, 'a copy photo queued before the retain lands')
+    t.is(await post, true, 'so does a copy post')
+    t.alike(await named, bytesOf(4), 'a read of a retained pair answers')
+    t.is(await unnamedPut, false, 'a group picture the retain does not name is dropped')
+    t.is(await unnamedRead, null, 'and so is a read of one')
+    t.is(await retained, true)
+    t.alike([...backend.state.meta.keys()].sort(), ['copyAvatars/' + B + '-' + CORE + '-1-1', 'copyGroupThumbs/' + B + '-' + SHA, 'copyPosts/' + A + '-' + CORE + '-2-1'])
+  }
+  {
+    const { store, backend } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    const photo = store.put('copyAvatars', B, desc(), bytesOf(4))
+    const named = store.readThumb(B, SHA)
+    store.retainThumbs([{ author: B, sha: SHA }])
+    const dropped = store.dropAuthors([B])
+    t.is(await photo, false, 'a drop of the author still cancels the put')
+    t.is(await named, null, 'and the read')
+    await dropped
+    t.is(backend.state.meta.size, 0)
+  }
+  {
+    const { store } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    const named = store.readThumb(B, SHA)
+    store.dropAuthors([B])
+    t.is(await named, null, 'a read overtaken by a drop alone answers null')
+  }
+})

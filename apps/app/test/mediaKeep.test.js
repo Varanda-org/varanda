@@ -960,7 +960,8 @@ test('releaseKept lets a trim delete a copy file or group picture again', async 
   const keep = await load()
   keep.wipeKept()
   const post = keep.keep('copyPosts', B, desc(), bytesOf(4))
-  const thumb = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  const thumb = keep.keptGroupThumb(B, SHA)
   files().get(post).mtime = BASE - 15 * DAY
   files().get(thumb).mtime = BASE - 15 * DAY
   keep.trimKept()
@@ -986,4 +987,35 @@ test('the first copy use of a start trims the copy kinds once', async (t) => {
   const keep2 = await import('../src/media/keep.native.js?copystart=b' + Date.now())
   keep2.bindPeek()
   t.absent(files().has(later), 'bindPeek also runs it')
+})
+
+test('a written group picture is not left in use: trimmable by age and caps', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const thumb = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  t.ok(thumb, 'kept')
+  files().get(thumb).mtime = BASE - 15 * DAY
+  keep.trimKept()
+  t.absent(files().has(thumb), 'past the copy age: gone at the next trim')
+
+  const old = keep.keepGroupThumb(B, SHA2, bytesOf(10), 'image/jpeg')
+  t.is(keep.keepGroupThumb(B, SHA2, bytesOf(10), 'image/jpeg'), old, 'keeping again does not mark it either')
+  files().get(old).mtime = BASE - 1
+  for (let i = 0; i < keep.KEEP_COPY_MAX_FILES; i++) placeKept('copyPosts', OTHER, desc({ start: i + 1 }), i + 1)
+  keep.trimKept()
+  t.absent(files().has(old), 'over the file cap, the oldest file, a written group picture, is trimmed')
+  t.is(inDir('copyPosts').length, keep.KEEP_COPY_MAX_FILES, 'and no copy photo for it')
+
+  // 180 copy photos in use and 20 left by an earlier run: the trim after the
+  // new picture goes past the 20 and would reach it next.
+  reset()
+  keep.wipeKept()
+  for (let i = 0; i < 20; i++) placeKept('copyPosts', OTHER, desc({ start: 300 + i }), i + 1)
+  let admitted = 0
+  for (let i = 0; i < 180; i++) if (keep.keep('copyPosts', B, desc({ start: i + 1 }), bytesOf(4)) !== null) admitted++
+  t.is(admitted, 180)
+  const fresh = keep.keepGroupThumb(A, SHA, bytesOf(10), 'image/jpeg')
+  t.ok(fresh && files().has(fresh), 'a new picture that crosses the cap survives its own trim')
+  t.is(inDir('copyPosts').length, 180, 'the files not in use made room')
 })

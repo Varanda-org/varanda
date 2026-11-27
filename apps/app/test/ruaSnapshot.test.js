@@ -1003,7 +1003,7 @@ test('A Rua\'s member list and its preview pass copy for stranger originals; the
   t.ok(fold.includes('fold: item, strangerPersist })'), 'and hands it to socialRowProps')
   const preview = fnText(CODE, 'ARuaPreview')
   t.is((preview.match(/strangerPersist: 'copy'/g) || []).length, 3, 'the preview\'s three rows')
-  t.is((preview.match(/persist: true/g) || []).length, 2, 'the rows with an explicit persist keep it')
+  t.is((preview.match(/persist: true/g) || []).length, 1, 'only the post row keeps an explicit persist: true (a fold root may be a stranger)')
   t.ok(/persistOf: \(\) => 'copy',/.test(fnText(CODE, 'previewSocial')), 'previewSocial answers copy')
   t.ok(CODE.includes('const persistOf = useCallback((author) => typeof author === \'string\' && isKnown(author.toLowerCase()), [isKnown])'), 'useSocial\'s persistOf is unchanged')
   t.ok(CODE.includes('persistOf: social.persistOf,') && CODE.includes('isKnown: latest.persistOf,'), 'and it is still the isKnown of the snapshot build')
