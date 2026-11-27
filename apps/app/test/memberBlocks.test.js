@@ -106,7 +106,8 @@ test('web: posts the list to the controlling worker', async (t) => {
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
   try {
-    const { reportBlocks } = await loadWeb()
+    const { openPushLists, reportBlocks } = await loadWeb()
+    openPushLists()
     reportBlocks([A, B])
     t.alike(sent, [{ type: 'varanda-blocks', keys: [A, B] }])
   } finally {
@@ -118,7 +119,8 @@ test('web: the mute list goes the same way, as its own message; native does noth
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
   try {
-    const { reportMutes } = await loadWeb()
+    const { openPushLists, reportMutes } = await loadWeb()
+    openPushLists()
     reportMutes([A])
     t.alike(sent, [{ type: 'varanda-mutes', keys: [A] }])
   } finally {
@@ -137,7 +139,8 @@ test('web: before a worker controls the page, the list waits for the active one'
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: null, ready: Promise.resolve({ active: { postMessage: (m) => sent.push(m) } }) } })
   try {
-    const { reportBlocks } = await loadWeb()
+    const { openPushLists, reportBlocks } = await loadWeb()
+    openPushLists()
     reportBlocks([A])
     await new Promise((resolve) => setTimeout(resolve, 0))
     t.alike(sent, [{ type: 'varanda-blocks', keys: [A] }])

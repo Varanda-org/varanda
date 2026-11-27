@@ -12,7 +12,7 @@ import { perfMarks, useNode } from './node'
 import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
-import { reportBlocks } from './pushBlocks'
+import { openPushLists, reportBlocks } from './pushBlocks'
 import { dropAuthors, newlyBlocked, noteBlocksKnown, registerLocalCache, wipeEpoch } from './localCaches'
 
 const EMPTY = new Set()
@@ -44,6 +44,14 @@ export function isLatestReload (mine, latest, epochAt, epochNow) {
 // set. Only the read is repeated, never the set.
 export function rereadsAfterWrites (writesAt, writesNow) {
   return writesAt !== writesNow
+}
+
+// The account the web worker's lists may belong to: an open, signed-in
+// session's key, else null (pushBlocks.web.js keeps the reports back then).
+export function pushSessionKey (status) {
+  if (status === null || typeof status !== 'object') return null
+  if (status.unlocked !== true || status.signedOut === true || typeof status.publicKey !== 'string') return null
+  return status.publicKey.toLowerCase()
 }
 
 const FALLBACK = {
@@ -91,6 +99,11 @@ export function BlocksProvider ({ children }) {
   // A wipe forgets the denied authors with the caches: the next list read
   // then counts every block as new and denies them again, owner unchanged.
   useEffect(() => registerLocalCache({ wipe: () => { keysRef.current = EMPTY } }), [])
+  // Whether a whole list read was committed since the last wipe: only such a
+  // list may go to the web worker again when an account opens.
+  const listedRef = useRef(false)
+  useEffect(() => registerLocalCache({ wipe: () => { listedRef.current = false } }), [])
+  const sessionKey = pushSessionKey(node.passkey ? node.passkey.status : null)
   const commit = useCallback((next) => {
     // Kept copies of a newly blocked author go before any screen can show
     // them again, whether the block was made here, on another device of the
@@ -132,6 +145,7 @@ export function BlocksProvider ({ children }) {
     // list the peek kinds may trust.
     if (answer && Array.isArray(answer.keys)) noteBlocksKnown(wiped)
     setLoadState((s) => nextLoadState(s, 'loaded'))
+    listedRef.current = true
     if (!markedRef.current) {
       markedRef.current = true
       perfMarks().mark('blocks-ok')
@@ -148,6 +162,14 @@ export function BlocksProvider ({ children }) {
     reload(() => live).catch(noop)
     return () => { live = false }
   }, [ready, node.epoch, generation, reload])
+
+  // block.list also answers with no account open, so the lists go to the
+  // worker only once one is; a list read before that is sent now.
+  useEffect(() => {
+    if (sessionKey === null) return
+    openPushLists()
+    if (listedRef.current) reportBlocks([...keysRef.current])
+  }, [sessionKey, node.epoch])
 
   const setBlock = useCallback(async (key, on) => {
     try {
