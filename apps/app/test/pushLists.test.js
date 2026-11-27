@@ -32,6 +32,27 @@ function setNavigator (t, value) {
   })
 }
 
+const OWED = 'varanda-push-lists-clear'
+
+// A localStorage of the page; null leaves none, 'throws' one whose every use
+// throws, as in a private window or with site data blocked.
+function setStorage (t, kind = 'map') {
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage')
+  const prev = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const items = new Map()
+  const fail = () => { throw new Error('storage blocked') }
+  const store = kind === 'throws'
+    ? { getItem: fail, setItem: fail, removeItem: fail }
+    : { getItem: (k) => (items.has(k) ? items.get(k) : null), setItem: (k, v) => items.set(k, String(v)), removeItem: (k) => items.delete(k) }
+  if (kind === 'getter') Object.defineProperty(globalThis, 'localStorage', { get: fail, configurable: true })
+  else Object.defineProperty(globalThis, 'localStorage', { value: store, configurable: true, writable: true })
+  t.teardown(() => {
+    if (had && prev) Object.defineProperty(globalThis, 'localStorage', prev)
+    else delete globalThis.localStorage
+  })
+  return items
+}
+
 function controlled (t) {
   const sent = []
   setNavigator(t, { serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
@@ -123,6 +144,81 @@ test('a throwing worker or a ready that rejects is harmless', async (t) => {
   await tick()
 })
 
+test('a clear that may not have reached the worker is sent again on each page load until an account opens', async (t) => {
+  const items = setStorage(t)
+  setNavigator(t, {})
+  const leaving = await freshWeb()
+  call(leaving.clearPushLists)
+  t.is(items.get(OWED), '1', 'no worker to take it: the clear is still owed')
+
+  let resolveReady
+  const ready = new Promise((resolve) => { resolveReady = resolve })
+  globalThis.navigator = { serviceWorker: { controller: null, ready } }
+  const sent = []
+  await freshWeb()
+  resolveReady({ active: { postMessage: (m) => sent.push(m) } })
+  await ready
+  await tick()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'the next load sends it once a worker is active, gate closed')
+
+  sent.length = 0
+  globalThis.navigator = { serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } }
+  const again = await freshWeb()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'and the one after, at once to a controlling worker')
+  t.is(items.get(OWED), '1', 'sending is no proof the worker kept it')
+
+  call(again.openPushLists)
+  t.absent(items.has(OWED), 'an open account reports its own lists from here on')
+  sent.length = 0
+  await freshWeb()
+  t.alike(sent, [], 'no clear once an account opened')
+})
+
+test('a report that waits for the worker on a page load still beats the owed clear', async (t) => {
+  const items = setStorage(t)
+  items.set(OWED, '1')
+  const sent = []
+  let resolveReady
+  const ready = new Promise((resolve) => { resolveReady = resolve })
+  setNavigator(t, { serviceWorker: { controller: null, ready } })
+  const mod = await freshWeb()
+  call(mod.openPushLists)
+  mod.reportBlocks([K])
+  mod.reportMutes([M])
+  resolveReady({ active: { postMessage: (m) => sent.push(m) } })
+  await ready
+  await tick()
+  t.alike(sent, [{ type: BLOCKS, keys: [K] }, { type: MUTES, keys: [M] }], 'only the open account\'s lists')
+})
+
+test('only the clear notes it: reports and the gate never do', async (t) => {
+  const items = setStorage(t)
+  controlled(t)
+  const mod = await freshWeb()
+  mod.reportBlocks([K])
+  call(mod.openPushLists)
+  mod.reportBlocks([K])
+  mod.reportMutes([M])
+  t.absent(items.has(OWED), 'a lock keeps the lists and sets nothing')
+})
+
+test('storage that throws, or none, keeps the clear sent once', async (t) => {
+  for (const kind of ['throws', 'getter']) {
+    const sub = t.test(kind)
+    sub.plan(4)
+    setStorage(sub, kind)
+    const sent = controlled(sub)
+    const mod = await freshWeb()
+    sub.execution(() => call(mod.clearPushLists))
+    sub.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'sent at once')
+    sent.length = 0
+    const next = await freshWeb()
+    sub.alike(sent, [], 'nothing on the next load')
+    sub.execution(() => call(next.openPushLists))
+    await sub
+  }
+})
+
 test('native: the same four names, no-ops that touch no browser global', async (t) => {
   setNavigator(t, new Proxy({}, { get () { throw new Error('navigator read') } }))
   const mod = await loadNative()
@@ -157,8 +253,15 @@ test('node.js: the owner change, a forgotten configuration, Sair and Recomeçar 
   const dispatchAt = op.indexOf('conn.identity[op](')
   const successAt = op.indexOf('async (result) => {')
   const failureAt = op.indexOf('async (err) => {')
-  const opClear = op.indexOf("if (name === 'signOut' || name === 'reset') clearPushLists()")
+  const opClear = op.indexOf("if (op === 'signOut' || op === 'reset') clearPushLists()")
   t.ok(dispatchAt !== -1 && successAt > dispatchAt, 'the operation is dispatched first')
+  // An older node without identity.signOut runs a lock for Sair, which keeps
+  // the session: the clear follows what ran, not what was asked.
+  const ranAt = op.indexOf('let op = name')
+  const fallbackAt = op.indexOf("op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name")
+  t.ok(ranAt !== -1 && ranAt < op.indexOf('try {') && fallbackAt > ranAt && fallbackAt < dispatchAt, 'the operation that ran stays in scope of the success path')
+  t.absent(/const op = /.test(op), 'not shadowed inside the try')
+  t.absent(/name === 'signOut'[^\n]*clearPushLists/.test(op), 'not by the name asked for')
   t.ok(opClear > successAt && opClear < failureAt, 'Sair and Recomeçar, only once the operation succeeded')
   t.ok(opClear < op.indexOf('setPkStatus(', successAt), 'before the status update')
   t.is(op.split('clearPushLists()').length - 1, 1, 'once in passkeyOp')

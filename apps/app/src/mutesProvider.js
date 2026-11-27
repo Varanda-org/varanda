@@ -89,7 +89,6 @@ export function MutesProvider ({ children, bindingOf }) {
     keysRef.current = next
     liveWipeRef.current = wipeEpoch()
     setKeys(next)
-    reportMutes([...next])
   }, [])
 
   const reload = useCallback(async (alive = () => true) => {
@@ -107,9 +106,14 @@ export function MutesProvider ({ children, bindingOf }) {
     // being adopted. Read again (a read, never a write), as block.list does.
     if (wipeEpoch() !== wiped) return reload(alive)
     commit(mutedSetOf(answer))
-    listedRef.current = true
-    trustedRef.current = Boolean(answer && Array.isArray(answer.keys))
-    if (trustedRef.current) saveQuietList('silenciados', bindingRef.current, keysRef.current)
+    // A malformed answer reads as no mutes on screen, but as "nobody muted"
+    // the web worker would show their pushes: it keeps the last whole list,
+    // and nothing is stored.
+    const listed = Boolean(answer && Array.isArray(answer.keys))
+    if (listed) reportMutes([...keysRef.current])
+    listedRef.current = listed
+    trustedRef.current = listed
+    if (listed) saveQuietList('silenciados', bindingRef.current, keysRef.current)
   }, [commit])
 
   // A failed read keeps what is known: the node filters either way.
@@ -146,6 +150,7 @@ export function MutesProvider ({ children, bindingOf }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
+      reportMutes([...next])
       if (listedRef.current && trustedRef.current) saveQuietList('silenciados', bindingRef.current, next)
       setChanged((n) => n + 1)
       return r

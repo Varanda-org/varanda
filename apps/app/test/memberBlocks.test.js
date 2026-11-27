@@ -305,7 +305,7 @@ test('blocksProvider: a block.list answer that is not a key array is never store
     h.answers[0](malformed)
     await read
     t.is(h.keysRef.current.size, 0, 'the screens read no blocks')
-    t.is(h.listedRef.current, true, 'still a list for the web worker')
+    t.is(h.listedRef.current, false, 'nor a list for the web worker')
     t.alike(h.saves, [], 'not stored by the reload')
     h.storeEffect()
     t.alike(h.saves, [], 'nor once storing is allowed')
@@ -329,4 +329,75 @@ test('blocksProvider: a block.list answer that is not a key array is never store
   t.is(h.saves.length, 3, 'a malformed answer after a good one stores nothing more')
   t.ok(/registerLocalCache\(\{ wipe: \(\) => \{ trustedRef\.current = false \} \}\)/.test(PROVIDER), 'a wipe forgets it')
   await flush()
+})
+
+// The provider's own commit, reload and session-open effect, run from its
+// source text against a stubbed node and worker.
+async function pushHarness (answers) {
+  const { blockedSetOf } = await load()
+  const slice = (from, to) => {
+    const start = PROVIDER.indexOf(from)
+    const end = PROVIDER.indexOf(to, start)
+    return start === -1 || end === -1 ? null : PROVIDER.slice(start + from.length, end + 1)
+  }
+  const commitText = slice('const commit = useCallback(', '}, [])')
+  const reloadText = slice('const reload = useCallback(', '}, [commit])')
+  const openText = slice('// worker only once one is; a list read before that is sent now.\n  useEffect(', '}, [sessionKey, node.epoch])')
+  const reported = []
+  const deps = {
+    liveWipeRef: { current: -1 },
+    trustedRef: { current: false },
+    saveQuietList: () => {},
+    bindingRef: { current: {} },
+    requestRef: { current: async () => answers.shift() },
+    epochRef: { current: 0 },
+    reloadSeqRef: { current: 0 },
+    writesRef: { current: 0 },
+    keysRef: { current: new Set() },
+    listedRef: { current: false },
+    markedRef: { current: true },
+    wipeEpoch: () => 0,
+    isLatestReload: (seq, seqNow, epoch, epochNow) => seq === seqNow && epoch === epochNow,
+    rereadsAfterWrites: (at, now) => at !== now,
+    blockedSetOf,
+    noteBlocksKnown: () => {},
+    setLoadState: () => {},
+    nextLoadState: () => 'loaded',
+    perfMarks: () => ({ mark () {} }),
+    newlyBlocked: () => [],
+    dropAuthors: () => {},
+    setKeys: () => {},
+    reportBlocks: (keys) => reported.push(keys),
+    openPushLists: () => {},
+    sessionKey: A
+  }
+  // eslint-disable-next-line no-new-func
+  const make = new Function('deps', 'const {' + Object.keys(deps).join(', ') + '} = deps\n' +
+    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nreturn { reload, open: ' + openText + ' }')
+  return { ...make(deps), reported, deps }
+}
+
+test('blocksProvider: a malformed block.list never reaches the worker, as a read or when the account opens', async (t) => {
+  const h = await pushHarness([{ keys: [A] }, { keys: 'x' }, null])
+  await h.reload()
+  t.alike(h.reported, [[A]], 'a whole list goes to the worker')
+  h.open()
+  t.alike(h.reported, [[A], [A]], 'and again when the account opens')
+  h.reported.length = 0
+  await h.reload()
+  t.is(h.deps.keysRef.current.size, 0, 'the screens read no blocks, as before')
+  t.alike(h.reported, [], 'the worker keeps the last whole list')
+  h.open()
+  t.alike(h.reported, [], 'nothing sent when the account opens')
+  await h.reload()
+  h.open()
+  t.alike(h.reported, [], 'an empty answer is not a list either')
+
+  const first = await pushHarness([{ nope: 1 }])
+  await first.reload()
+  first.open()
+  t.alike(first.reported, [], 'a malformed first answer sends nothing')
+  const src = PROVIDER
+  const set = src.slice(src.indexOf('const setBlock = useCallback'))
+  t.ok(/commit\(next\)\s*reportBlocks\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setBlock still goes to the worker')
 })

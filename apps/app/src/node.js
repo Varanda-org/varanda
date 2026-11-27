@@ -1311,9 +1311,11 @@ function LiveNodeProvider ({ children }) {
     // So were the recent music picks; synchronous, gone before the dispatch.
     if (name === 'signOut' || name === 'reset') clearMusicRecents()
     let pending
+    // The operation that actually ran, which the success path needs too.
+    let op = name
     try {
       // A node script without signOut (an older build) locks instead.
-      const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
+      op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
       if (typeof conn.identity[op] !== 'function') throw recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')
       pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
@@ -1333,8 +1335,9 @@ function LiveNodeProvider ({ children }) {
         const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
         if (changed) setEmptyCardKey(null)
         // The account left the device, so its lists leave the web worker.
-        // Only after a success: a failed sign-out keeps its pushes quiet.
-        if (name === 'signOut' || name === 'reset') clearPushLists()
+        // Only after a success: a failed sign-out keeps its pushes quiet, and
+        // so does the lock an older node runs for Sair, which keeps the session.
+        if (op === 'signOut' || op === 'reset') clearPushLists()
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
