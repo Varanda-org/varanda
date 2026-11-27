@@ -6,7 +6,7 @@ Na reabertura, A Rua, o Diário, as Conversas e os Avisos pintam nomes, fotos e 
 
 No pouso rodam `npm run lint`, os testes direcionados sobre o diff do PR (cada arquivo de teste alterado, cada arquivo de teste que importa ou lê por caminho um arquivo de `git diff --name-only origin/main...HEAD` e os testes de `apps/app` que varrem `src`, cada um com `node <arquivo>`) e `npm run demo`. A suíte inteira roda no GitHub CI (Node 20 e 24). Nenhum `npm test` local.
 
-Resultados (2026-11-27, Node 24): `npm run lint` sem erros; 204 arquivos de teste direcionados passaram (160 de `apps/app`, 22 deles porque varrem `src`; 33 de `apps/cli`; 9 de `packages/core`; 1 de `apps/site`; 1 de `packages/web-member`); `npm run demo` terminou com DEMO OK.
+Resultados (2026-11-27, Node 24): `npm run lint` sem erros; 195 arquivos de teste direcionados passaram (151 de `apps/app`, 33 de `apps/cli`, 9 de `packages/core`, 1 de `apps/site`, 1 de `packages/web-member`); `npm run demo` terminou com DEMO OK.
 
 O diff não toca `apps/app/ios/`, `apps/app/android/`, `apps/app/assets/worklet/`, `dist/`, `*.bundle` nem `apps/app/public/varanda-node.js` (conferido na entrega).
 
