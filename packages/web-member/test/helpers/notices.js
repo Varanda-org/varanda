@@ -64,6 +64,15 @@ async function diary (t, records) {
   return core
 }
 
+// `diary` only appends, which leaves the fork at 0. Truncate raises the fork
+// (hypercore 10 truncate defaults to fork + 1); the records appended are the
+// new history. Makers receive the diary key, as in `diary`,
+// so a rewritten block 0 can still name it.
+async function forkDiary (core, keepLength, records) {
+  await core.truncate(keepLength)
+  for (const make of records) await core.append(make(hex(core.key)))
+}
+
 function certOf (assoc) {
   return (key) => memberCertRecord(createCert({ member: key }, assoc.kp))
 }
@@ -228,6 +237,7 @@ module.exports = {
   issuer,
   iso,
   diary,
+  forkDiary,
   certOf,
   noticesSeeder,
   spyStorage,
