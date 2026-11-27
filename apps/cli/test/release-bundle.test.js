@@ -22,6 +22,9 @@ const BUNDLE = [
   'secrets.sealed.json', 'secrets-signers.txt'
 ]
 
+// update.sh puts VARANDA_MEDIA_ORIGIN into the web app with these two.
+const WEB_FINISHER = ['apps/app/scripts/finish-web.js', 'apps/app/scripts/sw.js']
+
 const OWNED = [
   'deploy/seeder/Dockerfile', '.dockerignore', 'deploy/seeder/compose.release.yaml',
   'deploy/seeder/compose.release.web.yaml', 'deploy/seeder/cosign.ref',
@@ -134,6 +137,9 @@ test('Dockerfile: source label and the deploy bundle copied to /app/deploy/seede
   t.ok(copy < userAt, 'copied before USER node, so root-owned')
   t.absent(/^COPY\s+--chown/m.test(finalStage.join('\n')), 'no --chown on the final stage copies')
   t.ok(finalStage.includes('WORKDIR /app'), 'WORKDIR /app')
+  const finisher = finalStage.indexOf('COPY ' + WEB_FINISHER.join(' ') + ' apps/app/scripts/')
+  t.ok(finisher > 0, 'finish-web.js and sw.js copied to /app/apps/app/scripts, where update.sh runs them')
+  t.ok(finisher < userAt, 'before USER node, so root-owned')
 })
 
 test('.dockerignore: everything excluded first, exactly the bundle admitted under deploy/', (t) => {
@@ -148,6 +154,7 @@ test('.dockerignore: everything excluded first, exactly the bundle admitted unde
   // admit the server checkout's .env or www: every admit rule is listed here.
   const admits = rules.filter((r) => r.startsWith('!'))
   const expected = ['!package.json', '!package-lock.json', '!LICENSE', '!packages/core', '!packages/rpc', '!packages/web-member/package.json', '!packages/web-member/lib', '!apps/cli']
+    .concat(WEB_FINISHER.map((f) => '!' + f))
     .concat(BUNDLE.map((f) => '!deploy/seeder/' + f))
   t.alike(admits.slice().sort(), expected.slice().sort(), 'the admit rules are exactly the CLI files plus the bundle')
   t.absent(admits.some((r) => r.includes('*')), 'no admit rule has a glob')

@@ -12,7 +12,11 @@
 // When the deploy sets VARANDA_MEDIA_ORIGIN (an https origin the media CDN
 // answers from), it is validated here and written into the worker, which adds
 // it to connect-src of the offline shell CSP (only that directive); it is
-// also part of the release id, so a new origin is a new release.
+// also part of the release id, so a new origin is a new release. The
+// published web image is built without one: on servers that install it
+// (deploy/seeder/update.sh, aplicar_origem_midia), the seeder image of the
+// same release runs this file again on a copy of that app with the server's
+// origin, so it must keep needing only Node's built-ins.
 // Usage: node scripts/finish-web.js [dist] -> prints one summary line, exit 0/1.
 // Running it twice on the same dist yields byte-identical files.
 

@@ -48,6 +48,10 @@ COPY apps/cli apps/cli
 # Só os arquivos que o .dockerignore da raiz admite em deploy/seeder; o COPY
 # mantém os bits de execução e o dono root.
 COPY deploy/seeder deploy/seeder
+# O finish-web.js e o modelo do service worker, de root: com
+# VARANDA_MEDIA_ORIGIN, o update.sh refaz com eles o sw.js e a versão do app
+# web da imagem web, que sai sem a origem (aplicar_origem_midia).
+COPY apps/app/scripts/finish-web.js apps/app/scripts/sw.js apps/app/scripts/
 RUN mkdir -p /data && chown node:node /data && chmod 0700 /data
 # Declarados aqui para não invalidar o cache das camadas acima. Os valores
 # chegam ao RUN como variáveis de ambiente e só entram no arquivo como

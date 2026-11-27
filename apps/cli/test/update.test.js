@@ -17,6 +17,8 @@ const repoRoot = path.resolve(__dirname, '../../..')
 const SEEDER = path.join(repoRoot, 'deploy/seeder')
 const SCRIPT = path.join(SEEDER, 'update.sh')
 const WELL_KNOWN = path.join(SEEDER, 'well-known.sh')
+const RENDER = path.join(repoRoot, 'apps/app/scripts/finish-web.js')
+const { finishWeb } = require(RENDER)
 const OWNED = [
   'deploy/seeder/update.sh', 'deploy/seeder/update.conf.example',
   'deploy/seeder/varanda-update.service', 'deploy/seeder/varanda-update.timer',
@@ -248,6 +250,23 @@ docker() {
         *" /app/caddy.json "*)
           [ -f "$FIX/caddy.json" ] || return 1
           cat "$FIX/caddy.json" ;;
+        # The web app finisher of the seeder image: $FIX/no_render (an older
+        # image without it), $FIX/render_err (docker fails) and
+        # $FIX/render_fail (the run fails); otherwise the real
+        # apps/app/scripts/finish-web.js runs on the mounted copy.
+        *" --entrypoint test "*" -f /app/apps/app/scripts/finish-web.js "*)
+          printf '%s\n' "$*" >>"$FIX/render_calls"
+          if [ -f "$FIX/render_err" ]; then return 125; fi
+          if [ -f "$FIX/no_render" ]; then return 1; fi
+          return 0 ;;
+        *" --entrypoint node "*" /app/apps/app/scripts/finish-web.js /web ")
+          printf '%s\n' "$*" >>"$FIX/render_calls"
+          if [ -f "$FIX/render_fail" ]; then return 1; fi
+          wi=$(mount_source /web "$@")
+          for a in "$@"; do
+            case $a in VARANDA_MEDIA_ORIGIN=*) ef=$` + '{a#VARANDA_MEDIA_ORIGIN=}' + String.raw` ;; esac
+          done
+          VARANDA_MEDIA_ORIGIN="$ef" "$NODE" "$RENDER" "$wi" >/dev/null || return 1 ;;
         *" --entrypoint cat "*) cat "$FIX/release.json" ;;
       esac
       ;;
@@ -425,6 +444,7 @@ function server (t) {
       'releases=' + JSON.stringify(p('releases')) + '\nunits_dir=' + JSON.stringify(p('units')) + '\n' +
       'aqui=' + JSON.stringify(p('aqui')) + '\nFIX=' + JSON.stringify(p('fix')) + '\nCALLS=' + JSON.stringify(p('calls')) + '\n' +
       'chave_segredos=' + JSON.stringify(p('etc/secrets-key.json')) + '\nsegredos="$state/segredos"\n' +
+      'NODE=' + JSON.stringify(process.execPath) + '\nRENDER=' + JSON.stringify(RENDER) + '\n' +
       '. ' + JSON.stringify(WELL_KNOWN) + '\n' + STUBS + '\n' + commands + '\n'
     // From a file, not `bash -c`: Linux refuses a single argument over 128 KiB (E2BIG),
     // and update.sh alone is past that.
@@ -1331,6 +1351,166 @@ test('update.sh: reconfigure to profile full refuses a release prepared without 
   s.write('state/atual', record(H('4', 40), 5, SEEDER_REF, WEB_REF))
   const ok = s.run(MAIN + 'cmd_reconfigure')
   t.is(ok.status, 0, 'a release with www reconfigures in profile full: ' + ok.log)
+})
+
+// The web app as the web image ships it (Dockerfile.web): an export finished
+// by finish-web.js without a media origin, then version.json rewritten.
+const MEDIA = 'https://midia.exemplo.org'
+const MEDIA_ENV = 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\nVARANDA_MEDIA_ORIGIN=' + MEDIA + '\n'
+function shippedApp (dir, mediaOrigin = '') {
+  const files = {
+    'index.html': '<!DOCTYPE html><html><head><title>Varanda</title></head><body></body></html>\n',
+    'varanda-node.js': 'module.exports = "node"\n',
+    'manifest.webmanifest': '{"name":"Varanda"}\n',
+    '_expo/static/js/web/index-0123456789abcdef.js': 'console.log("varanda")\n'
+  }
+  for (const [name, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true })
+    fs.writeFileSync(path.join(dir, name), text)
+  }
+  const log = console.log
+  console.log = () => {}
+  try { finishWeb(dir, undefined, { mediaOrigin }) } finally { console.log = log }
+  fs.writeFileSync(path.join(dir, 'version.json'), '{"v":1,"commit":"' + COMMIT + '"}\n')
+}
+// What finish-web.js writes: sw.js, index.html and the node copies, with the
+// release id marked in index.html.
+function appFiles (dir) {
+  const out = { version: fs.readFileSync(path.join(dir, 'index.html'), 'utf8').match(/<meta name="varanda-release" content="([0-9a-f]{16})">/)[1] }
+  for (const f of fs.readdirSync(dir).sort()) {
+    if (f === 'sw.js' || f === 'index.html' || /^varanda-node-[0-9a-f]{16}\.js$/.test(f)) out[f] = fs.readFileSync(path.join(dir, f), 'utf8')
+  }
+  return out
+}
+const RENDER_CHECK = 'run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint test ' +
+  SEEDER_REF + ' -f /app/apps/app/scripts/finish-web.js'
+const renderRun = (s, origin) => 'run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 ' +
+  '--mount type=bind,source=' + s.p('state/www-midia') + ',target=/web -e VARANDA_MEDIA_ORIGIN=' + origin +
+  ' --entrypoint node ' + SEEDER_REF + ' /app/apps/app/scripts/finish-web.js /web'
+const renders = (s) => s.read('fix/render_calls').split('\n').filter(Boolean)
+
+// The published web image is built without VARANDA_MEDIA_ORIGIN, so the
+// offline shell CSP of a pull-mode server left the CDN out of connect-src.
+test('update.sh: apply puts VARANDA_MEDIA_ORIGIN into the web app, as a build with it would', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV + MEDIA_ENV)
+  s.write('state/atual', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  fs.rmSync(s.p('fix/web'), { recursive: true })
+  shippedApp(s.p('fix/web'))
+  const image = appFiles(s.p('fix/web'))
+  shippedApp(s.p('expected'), MEDIA)
+  const built = appFiles(s.p('expected'))
+  t.not(built.version, image.version, 'the origin is part of the release id')
+
+  s.write('fix/render_fail', '')
+  const bad = s.run(MAIN + 'cmd_apply')
+  t.is(bad.status, 1, 'a failed render fails the apply')
+  t.ok(bad.log.includes('não foi possível gravar a origem de mídia no app web com ' + SEEDER_REF + ' (saída 1)'), 'says so')
+  t.absent(/ up -d/.test(bad.calls), 'nothing is started')
+  t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB), 'atual unchanged')
+  t.absent(s.exists('state/www-midia'), 'the work copy is removed')
+  fs.rmSync(s.p('fix/render_fail'))
+  fs.rmSync(s.p('fix/render_calls'), { force: true })
+  fs.rmSync(s.p('calls'))
+
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'apply passes: ' + r.log)
+  const www = s.p('releases', COMMIT, 'www')
+  t.alike(appFiles(www), built, 'sw.js, index.html and the node copy of a build with the origin, byte for byte')
+  t.is(fs.readFileSync(path.join(www, 'version.json'), 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', 'version.json written by root')
+  t.alike(renders(s), [RENDER_CHECK, renderRun(s, MEDIA)], 'the seeder image of the release, locked down, without network, on the work copy only')
+  t.ok(r.calls.indexOf('--entrypoint node') < r.calls.indexOf('up -d --no-build'), 'before anything starts')
+  t.absent(s.exists('state/www-midia'), 'the work copy is removed')
+  t.ok(r.log.includes('app web com a origem de mídia ' + MEDIA + ': versão ' + built.version), 'logs the release id')
+})
+
+test('update.sh: reconfigure turns the media origin of the installed web app on and off', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  const dir = installRelease(s, COMMIT, { www: false })
+  const www = path.join(dir, 'www')
+  shippedApp(www)
+  // A file gravar_associacoes does not manage, so the folder stays.
+  fs.mkdirSync(path.join(www, '.well-known'))
+  fs.writeFileSync(path.join(www, '.well-known', 'outro.txt'), 'x\n')
+  const image = appFiles(www)
+  // Left by an interrupted swap: never part of the release.
+  fs.writeFileSync(path.join(www, '.sw.js.midia'), 'sobra\n')
+  shippedApp(s.p('expected'), MEDIA)
+  const built = appFiles(s.p('expected'))
+  s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+  const reconfigure = (env) => {
+    s.write('etc/varanda.env', env)
+    fs.rmSync(s.p('calls'), { force: true })
+    return s.run(MAIN + 'cmd_reconfigure')
+  }
+
+  const on = reconfigure(FULL_ENV + MEDIA_ENV)
+  t.is(on.status, 0, 'reconfigure with the origin passes: ' + on.log)
+  t.alike(appFiles(www), built, 'the files of a build with the origin (.well-known and the leftover out of the precache)')
+  t.absent(fs.existsSync(path.join(www, '.sw.js.midia')), 'the leftover is replaced')
+  t.ok(fs.existsSync(path.join(www, '.well-known', 'outro.txt')), '.well-known stays in www')
+  t.is(fs.readFileSync(path.join(www, 'version.json'), 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', 'version.json untouched')
+  t.ok(on.calls.indexOf('--entrypoint node') < on.calls.indexOf(' up -d'), 'before compose up')
+  t.absent(s.exists('state/www-midia'), 'the work copy is removed')
+
+  const again = reconfigure(FULL_ENV + MEDIA_ENV)
+  t.is(again.status, 0, 'the same origin again passes: ' + again.log)
+  t.is(renders(s).length, 2, 'and runs nothing')
+  t.alike(appFiles(www), built, 'files unchanged')
+
+  const off = reconfigure(FULL_ENV)
+  t.is(off.status, 0, 'reconfigure without the origin passes: ' + off.log)
+  t.alike(appFiles(www), image, 'the bytes and release id of the image again')
+  t.is(renders(s)[3], renderRun(s, ''), 'rendered with an empty origin')
+  t.is(reconfigure(FULL_ENV).status, 0, 'and once more')
+  t.is(renders(s).length, 4, 'runs nothing when the image bytes are already there')
+})
+
+test('update.sh: the media origin step skips an older app or image and stops on a failure', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV + MEDIA_ENV)
+  const dir = installRelease(s, COMMIT)
+  const www = path.join(dir, 'www')
+  s.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF))
+
+  const older = s.run(MAIN + 'cmd_reconfigure')
+  t.is(older.status, 0, 'an app without MEDIA_ORIGIN in sw.js passes: ' + older.log)
+  t.ok(older.log.includes('o sw.js de ' + www + ' não tem MEDIA_ORIGIN'), 'says the app predates the CDN')
+  t.alike(renders(s), [], 'nothing runs')
+  t.is(fs.readFileSync(path.join(www, 'sw.js'), 'utf8'), 'sw.js\n', 'sw.js unchanged')
+
+  fs.rmSync(www, { recursive: true })
+  shippedApp(www)
+  const image = appFiles(www)
+  s.write('fix/no_render', '')
+  const noRender = s.run(MAIN + 'cmd_reconfigure')
+  t.is(noRender.status, 0, 'a seeder image without finish-web.js passes: ' + noRender.log)
+  t.ok(noRender.log.includes('sem /app/apps/app/scripts/finish-web.js em ' + SEEDER_REF), 'says so')
+  t.alike(renders(s), [RENDER_CHECK], 'only the check ran')
+  t.alike(appFiles(www), image, 'the app is untouched')
+  fs.rmSync(s.p('fix/no_render'))
+
+  for (const [fix, text] of [
+    ['render_err', 'não foi possível conferir /app/apps/app/scripts/finish-web.js em ' + SEEDER_REF + ' (saída 125)'],
+    ['render_fail', 'não foi possível gravar a origem de mídia no app web com ' + SEEDER_REF + ' (saída 1)']
+  ]) {
+    s.write('fix/' + fix, '')
+    fs.rmSync(s.p('calls'), { force: true })
+    const r = s.run(MAIN + 'cmd_reconfigure')
+    t.is(r.status, 1, fix + ': reconfigure fails')
+    t.ok(r.log.includes(text), fix + ': says why')
+    t.ok(r.log.includes('reconfiguração não concluída'), fix + ': not concluded')
+    t.absent(/ up -d/.test(r.calls), fix + ': nothing is restarted')
+    t.alike(appFiles(www), image, fix + ': the app is untouched')
+    t.absent(s.exists('state/www-midia'), fix + ': no work copy left')
+    fs.rmSync(s.p('fix/' + fix))
+  }
 })
 
 test('update.sh: apply when up to date with an intervention re-ups the installed release', (t) => {

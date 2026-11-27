@@ -1,6 +1,7 @@
 # Build context of the seeder image (deploy/seeder/Dockerfile): only what the
-# CLI needs at run time, plus the LICENSE that ships with it and the deploy
-# bundle (/app/deploy/seeder), so a server runs a release without a checkout.
+# CLI needs at run time, plus the LICENSE that ships with it, the deploy
+# bundle (/app/deploy/seeder), so a server runs a release without a checkout,
+# and the two files update.sh uses to put the media origin into the web app.
 # Only these deploy files: never .env, www or anything else under deploy/.
 *
 !package.json
@@ -11,6 +12,8 @@
 !packages/web-member/package.json
 !packages/web-member/lib
 !apps/cli
+!apps/app/scripts/finish-web.js
+!apps/app/scripts/sw.js
 !deploy/seeder/compose.yaml
 !deploy/seeder/compose.web.yaml
 !deploy/seeder/compose.release.yaml
