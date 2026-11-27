@@ -101,10 +101,14 @@
 # invoke roda antes de todo handle (a ordem padrão das diretivas do Caddy),
 # então o 403 vale para /seeder, /account/* e o resto, e não só para o que
 # nenhum handle pegou. O respond não é um erro (não passa pelo
-# handle_errors), e o no-store vem daqui: o CDN não guarda o 403.
+# handle_errors), e o no-store vem daqui: o CDN não guarda o 403. O route
+# é obrigatório: sem ele, o Caddy 2.11.6 guarda só a primeira diretiva de
+# uma rota nomeada (o header) e o pedido segue para o handle de sempre.
 &(borda_recusada) {
-	header Cache-Control "no-store"
-	respond 403
+	route {
+		header Cache-Control "no-store"
+		respond 403
+	}
 }
 
 {$VARANDA_DOMAIN} {

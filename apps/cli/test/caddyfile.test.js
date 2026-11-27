@@ -884,8 +884,10 @@ test('Caddyfile: with the CDN secret, a CDN request outside /media/* gets 403 be
   t.absent(run(SECRET, ''), 'no CDN header: the rule does not apply')
   t.ok(run(SECRET, SECRET), 'the CDN header with the secret set: 403 outside /media/*')
   t.ok(run(SECRET, 'x'), 'any value of the header: 403 outside /media/*')
-  t.alike(block('&(borda_recusada) {').map((l) => l.trim()), ['&(borda_recusada) {', 'header Cache-Control "no-store"', 'respond 403', '}'],
-    'a named route that only answers 403, no-store (a respond skips handle_errors, so the CDN must not keep it)')
+  // Caddy 2.11.6 keeps only the first directive of a named route body (seen
+  // in `caddy adapt`: the header without the respond), so both go in a route.
+  t.alike(block('&(borda_recusada) {').map((l) => l.trim()), ['&(borda_recusada) {', 'route {', 'header Cache-Control "no-store"', 'respond 403', '}', '}'],
+    'a named route that only answers 403, no-store (a respond skips handle_errors, so the CDN must not keep it), inside one route')
   t.is(block('&(borda_recusada) {')[0], '&(borda_recusada) {', 'defined at the top level')
   const site = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
   const invoke = lines.findIndex((l) => l === '\tinvoke @bordaFora borda_recusada')
