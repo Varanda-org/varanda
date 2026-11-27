@@ -7,6 +7,16 @@ const test = require('brittle')
 const { createHash, webcrypto } = require('node:crypto')
 const load = () => import('../src/media/avatar.js')
 
+// The same SHA-256 as WebCrypto, settled at once: WebCrypto hashes on the
+// thread pool, so on a loaded CI runner the background keep outlived flush().
+const quickSubtle = {
+  digest: async (alg, data) => {
+    const view = ArrayBuffer.isView(data) ? data : new Uint8Array(data)
+    const out = createHash(alg === 'SHA-256' ? 'sha256' : alg).update(Buffer.from(view.buffer, view.byteOffset, view.byteLength)).digest()
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength)
+  }
+}
+
 function compileAvatarUI (file, modules, globals = {}) {
   const { readFileSync } = require('node:fs')
   const { join } = require('node:path')
@@ -224,7 +234,7 @@ async function avatarUI ({ keptOnly = false, keptHit = null, distinct = false, r
     '../appClient': { isAppClient: () => true },
     '../blocksProvider': { useBlocks: () => ({}) },
     './Icon': { Icon: 'Icon' },
-    './MediaView': { KeptOnlyContext: {}, keptOnlyUrl: keptUrl, mediaHashDeps: () => ({ subtle: webcrypto.subtle }) },
+    './MediaView': { KeptOnlyContext: {}, keptOnlyUrl: keptUrl, mediaHashDeps: () => ({ subtle: quickSubtle }) },
     './theme': { stripes },
     './ThemeProvider': { useTheme: () => ({ colors: {} }) }
   }
