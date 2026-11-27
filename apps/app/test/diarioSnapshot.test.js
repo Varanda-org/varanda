@@ -118,7 +118,7 @@ test('the snapshot is written only after a live page, a deletion or a fill that 
 })
 
 test('the newest read captures the generation before log.read and passes it to the save', (t) => {
-  t.ok(/import \{ allowedAuthor, cacheGeneration, wipeEpoch \} from '\.\.\/localCaches'/.test(CODE))
+  t.ok(/import \{ cacheGeneration, deniedAuthor, wipeEpoch \} from '\.\.\/localCaches'/.test(CODE))
   t.ok(/const gen = cacheGeneration\(\)\s+const wipe = wipeEpoch\(\)\s+const log = await readLog\(/.test(loadNewest), 'read in the tick that starts the log request')
   t.ok(/const epoch = identityRef\.current\.epoch\s+if \(plainLogEpochRef\.current !== epoch\) \{\s+try \{\s+return await request\('log.read'/.test(readLog), 'readLog sends in the tick it is called')
   t.absent(armSnapshot.includes('cacheGeneration()'), 'arming forwards the same generation')
@@ -255,7 +255,7 @@ test('a built diario snapshot seeds rows with the live shape', async (t) => {
   const originals = new Map([[FOLLOW + ':2', post(FOLLOW, 2)], [STRANGER + ':4', post(STRANGER, 4)]])
   const built = snap.buildScreenSnapshot('diario', { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME, log, originals, followed: (a) => a === OWN || a === FOLLOW, blocked: new Set() })
   t.ok(built, 'built')
-  t.alike(Object.keys(built.body.originals), [FOLLOW + ':2'], 'only a followed original')
+  t.alike(Object.keys(built.body.originals), [FOLLOW + ':2', STRANGER + ':4'], 'a followed original and the quoted stranger\'s')
   const parsed = snap.parseScreenSnapshot(JSON.stringify(built), 'diario', { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME })
   const seed = diarioSeed(parsed)
   t.alike(seed.data.rows.map((r) => r.seq), [9, 6, 5], 'only posts and reposts, newest first')
@@ -266,7 +266,7 @@ test('a built diario snapshot seeds rows with the live shape', async (t) => {
   t.is(seed.data.oldest, 5)
   t.is(seed.data.atEnd, false)
   t.absent('loadedAt' in seed.data)
-  t.alike(seed.social.originals, [[FOLLOW + ':2', post(FOLLOW, 2)]])
+  t.alike(seed.social.originals, [[FOLLOW + ':2', post(FOLLOW, 2)], [STRANGER + ':4', post(STRANGER, 4)]])
   t.is(seed.social.counts.size, 0, 'no counts are stored')
   t.is(diarioSeed(null), null)
   t.is(snap.parseScreenSnapshot(JSON.stringify(built), 'diario', { origin: ORIGIN, association: ASSOC, owner: OWN, acting: { kind: 'page', key: FOLLOW } }), null, 'a page reads nothing')
@@ -768,7 +768,7 @@ test('Publicações fills at most 4 older pages per first page and never draws a
   t.ok(/muralPages\.current = 0\s+postsPages\.current = 0\s+fillSaveRef\.current = false/.test(loadNewest), 'a new first page restarts the budget')
 })
 
-test('an unfollow purge during the delay: the retried save does not restore the pruned repost', async (t) => {
+test('a purge during the delay: the retried save keeps an unfollowed author\'s repost and drops a blocked one\'s', async (t) => {
   const snap = await import('../src/screenSnapshot.js')
   const caches = await import('../src/localCaches.js')
   // eslint-disable-next-line no-new-func
@@ -776,6 +776,7 @@ test('an unfollow purge during the delay: the retried save does not restore the 
   const timing = helper('diarioSaveTiming')
   const write = helper('diarioSnapshotWrite')
   const { publicationCount } = publicationHelpers()
+  const notDenied = (a) => !caches.deniedAuthor(a)
   const quote = { seq: 6, entry: { seq: 6, record: { type: 'post', text: 'q', at: at(6), replyTo: null, quote: { author: FOLLOW, seq: 3 } } } }
   const rows = [repostRow(9, true), repostRow(8, true, { author: OWN, seq: 1 }), postRow(7), quote, repostRow(5, true, { author: STRANGER, seq: 4 })]
   const live = { info: { publicKey: OWN }, rows, atEnd: false, oldest: 5, gen: 1, wipe: caches.wipeEpoch(), deletions: 0 }
@@ -784,17 +785,21 @@ test('an unfollow purge during the delay: the retried save does not restore the 
   caches.keepOnlyAuthors(new Set([OWN, STRANGER]))
   t.is(timing({ gen, retried: false, liveGen: gen, liveWipe: live.wipe, generation: caches.cacheGeneration(), wipe: caches.wipeEpoch() }), 'retry')
   t.absent(caches.allowedAuthor(FOLLOW), 'FOLLOW is outside the allowed set now')
-  const kept = purgedRows(live.rows, OWN.toUpperCase(), caches.allowedAuthor)
-  t.alike(kept.map((r) => r.seq), [8, 7, 6, 5], 'the repost of the unfollowed author goes; the own quote post, own and allowed rows stay')
+  t.alike(purgedRows(live.rows, OWN.toUpperCase(), caches.allowedAuthor).map((r) => r.seq), [8, 7, 6, 5], 'the old rule (the follow set) dropped the repost of the unfollowed author')
+  t.alike(purgedRows(live.rows, OWN.toUpperCase(), notDenied).map((r) => r.seq), [9, 8, 7, 6, 5], 'an unfollow keeps it, as the stored copy keeps the stranger\'s original')
   caches.dropAuthors([STRANGER])
-  t.alike(purgedRows(live.rows, OWN, caches.allowedAuthor).map((r) => r.seq), [8, 7, 6], 'a repost of a blocked (denied) author goes too')
-  const source = { ...live, rows: purgedRows(live.rows, OWN, caches.allowedAuthor) }
+  t.alike(purgedRows(live.rows, OWN, notDenied).map((r) => r.seq), [9, 8, 7, 6], 'a repost of a blocked (denied) author goes; the own quote post, own and allowed rows stay')
+  const source = { ...live, rows: purgedRows(live.rows, OWN, notDenied) }
   const built = buildFrom(snap, source)
   t.is(write({ built, shown: publicationCount(source.rows, null), atEnd: false }), 'save')
   const seed = seedOf(snap, built)
-  t.absent(seed.data.rows.some((r) => r.entry.record.type === 'repost' && r.entry.record.to.author !== OWN), 'no repost of a purged author is stored again')
+  t.absent(seed.data.rows.some((r) => r.entry.record.type === 'repost' && r.entry.record.to.author === STRANGER), 'no repost of a blocked author is stored again')
+  t.ok(seed.data.rows.some((r) => r.entry.record.type === 'repost' && r.entry.record.to.author === FOLLOW), 'the repost of the unfollowed author is stored')
   caches.wipeLocalCaches()
-  t.ok(/if \(source !== null && retried === true\) source = \{ \.\.\.source, rows: purgedRows\(source\.rows, l\.binding\.owner, allowedAuthor\) \}/.test(writeSnapshot), 'the retried save writes the purged rows')
+  t.ok(/if \(source !== null && retried === true\) source = \{ \.\.\.source, rows: purgedRows\(source\.rows, l\.binding\.owner, \(a\) => !deniedAuthor\(a\)\) \}/.test(writeSnapshot), 'the retried save writes the rows without denied authors')
+  t.is(CODE.split('purgedRows(').length - 1, 2, 'two calls')
+  t.is(writeSnapshot.split('(a) => !deniedAuthor(a))').length - 1, 2, 'both calls purge by the block list')
+  t.absent(CODE.includes('allowedAuthor'), 'never by the follow set')
   const sourceAt = writeSnapshot.indexOf('let source = ')
   t.ok(sourceAt < writeSnapshot.indexOf('holdsDeleted(source.rows') && sourceAt < writeSnapshot.indexOf('diarioLogOf({ ...source'), 'before the deletion check and the build')
 })
@@ -814,8 +819,10 @@ test('a retried save keeps an own quote post of an author no longer allowed, as 
   t.is(write({ built: buildFrom(snap, source), shown: publicationCount(kept, null), atEnd: true }), 'save', 'the only publication is saved, never cleared')
   const stored = { record: { type: 'repost', to: { author: STRANGER, seq: 4 } } }
   const storedQuote = { record: { type: 'post', quote: { author: STRANGER, seq: 3 } } }
-  const pruned = snap.screenKeepOnlyAuthors({ v: 1, kind: 'diario', origin: ORIGIN, association: ASSOC, owner: OWN, savedAt: 1, body: { rows: [storedQuote, stored], oldest: 5, atEnd: true, originals: {} } }, [OWN])
-  t.is(pruned.body.rows.length, 1, 'the stored copy\'s purge keeps the same rows')
+  const copy = { v: 1, kind: 'diario', origin: ORIGIN, association: ASSOC, owner: OWN, savedAt: 1, body: { rows: [storedQuote, stored], oldest: 5, atEnd: true, originals: {} } }
+  t.is(snap.screenKeepOnlyAuthors(copy, [OWN]), copy, 'a follow change leaves the stored copy as it is')
+  const pruned = snap.screenWithoutAuthors(copy, [STRANGER])
+  t.is(pruned.body.rows.length, 1, 'a block keeps the own quote and drops the own repost')
   t.is(pruned.body.rows[0], storedQuote)
 })
 
@@ -890,7 +897,7 @@ test('a kept copy never paints a stored repost the live page turned off', async 
   const originals = new Map([[OWN + ':1', post(OWN, 1)]])
   const trimmed = storedCopyRows(boot.data.rows, next, (ref) => originals.get(ref))
   t.alike(trimmed.map((r) => r.seq), [6, 5], 'R leaves the stored rows')
-  const rows = purgedRows(trimmed, OWN, caches.allowedAuthor)
+  const rows = purgedRows(trimmed, OWN, (a) => !caches.deniedAuthor(a))
   const copy = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: helper('diarioLogOf')({ rows, atEnd: false }, OWN), originals, followed: (a) => a === OWN, blocked: new Set() })
   t.is(write({ built: copy, shown: publicationCount(rows, null), atEnd: false }), 'save')
   const again = seedOf(snap, copy)
@@ -901,8 +908,8 @@ test('a kept copy never paints a stored repost the live page turned off', async 
   t.alike(gone.map((r) => r.seq), [9, 5], 'a stored post confirmed deleted goes too')
   t.is(storedCopyRows(null, next, () => undefined), null, 'no seeded copy on disk: nothing to rewrite')
   const keep = writeSnapshot.slice(writeSnapshot.indexOf("if (write === 'keep' && !deletionPending) {"), writeSnapshot.indexOf('writtenDeletionsRef.current = deletions\n    seedRowsRef'))
-  t.ok(/const trimmed = storedCopyRows\(seedRowsRef\.current, dataRef\.current, \(ref\) => l\.originals\.get\(ref\)\)\s+if \(trimmed === null\) return\s+const rows = purgedRows\(trimmed, l\.binding\.owner, allowedAuthor\)/.test(keep), 'a kept save rewrites the stored rows it superseded')
-  t.ok(/log: diarioLogOf\(\{ rows: publicationRows\(rows, null\), atEnd: false \}, l\.binding\.owner\)/.test(keep) && keep.includes('blocked: l.blocked') && keep.includes('followed: l.persistOf'), 'same build and filters as a save')
+  t.ok(/const trimmed = storedCopyRows\(seedRowsRef\.current, dataRef\.current, \(ref\) => l\.originals\.get\(ref\)\)\s+if \(trimmed === null\) return\s+const rows = purgedRows\(trimmed, l\.binding\.owner, \(a\) => !deniedAuthor\(a\)\)/.test(keep), 'a kept save rewrites the stored rows it superseded')
+  t.ok(/log: diarioLogOf\(\{ rows: publicationRows\(rows, null\), atEnd: false \}, l\.binding\.owner\)/.test(keep) && keep.includes('blocked: l.blocked') && keep.includes('followed: l.persistOf') && keep.includes('profileOf: l.profileOf'), 'same build and filters as a save')
   t.ok(/const save = diarioSnapshotWrite\(\{ built: copy, shown: publicationCount\(rows, null\), atEnd: false \}\) === 'save'\s+seedRowsRef\.current = save \? rows : null\s+if \(save\) saveScreenSnapshot\('diario', copy, gen\)\s+else clearScreenSnapshot\('diario'\)/.test(keep), 'saved under the same generation, or cleared when nothing paints')
 })
 
@@ -944,11 +951,100 @@ test('a kept copy drops a seeded repost the live span turned off and settled out
   t.is(write({ built: buildFrom(snap, source), shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'keep')
   const trimmed = storedCopyRows(boot.data.rows, next, (ref) => originals.get(ref))
   t.alike(trimmed.map((r) => r.seq), [5], 'the seeded repost the off superseded leaves the copy')
-  const rows = purgedRows(trimmed, OWN, caches.allowedAuthor)
+  const rows = purgedRows(trimmed, OWN, (a) => !caches.deniedAuthor(a))
   const copy = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: helper('diarioLogOf')({ rows, atEnd: false }, OWN), originals, followed: (a) => a === OWN, blocked: new Set() })
   t.is(write({ built: copy, shown: publicationCount(rows, null), atEnd: false }), 'save')
   t.alike(seedOf(snap, copy).data.rows.map((r) => r.seq), [5], 'the next diarioSeed paints only the post')
   t.alike(storedCopyRows([repostRow(20, true, R), postRow(5), postRow(4)], { ...next, rows: next.rows.filter((r) => r.seq !== 5) }, () => undefined).map((r) => r.seq), [], 'a seeded row the live reads settled away goes too')
   t.ok(/const seedRowsRef = useRef\(boot === null \? null : boot\.data\.rows\)/.test(screen), 'compared with the copy as seeded at boot')
   t.ok(/if \(seeded === null\) seedRowsRef\.current = null/.test(loadNewest), 'a replacing read stops the comparison')
+})
+
+// A Map-backed raw text store for createScreenSnapshotStore.
+function memoryStore () {
+  const texts = new Map()
+  return { texts, raw: { load: (k) => texts.get(k), save: (k, v) => { texts.set(k, v) }, clear: (k) => { texts.delete(k) } } }
+}
+
+test('an own quote and repost of a stranger keep the original and the name; a block takes them, a follow change does not', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const caches = await import('../src/localCaches.js')
+  const OTHER = 'dd'.repeat(32)
+  const face = { core: '56'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 2, bytes: 40000, sha256: '78'.repeat(32), width: 512, height: 512 }
+  const log = {
+    key: OWN,
+    entries: [
+      { seq: 9, record: { type: 'post', text: 'olha', at: at(9), replyTo: null, quote: { author: STRANGER, seq: 4 } } },
+      { seq: 8, record: { type: 'repost', to: { author: STRANGER, seq: 3 }, on: true, at: at(8) } },
+      { seq: 7, record: { type: 'repost', to: { author: OTHER, seq: 1 }, on: true, at: at(7) } },
+      { seq: 6, record: { type: 'post', text: 'minha', at: at(6), replyTo: null } }
+    ],
+    entriesTruncated: 0
+  }
+  const originals = new Map([[STRANGER + ':4', post(STRANGER, 4)], [STRANGER + ':3', post(STRANGER, 3)], [OTHER + ':1', post(OTHER, 1)]])
+  const profiles = { [STRANGER]: { name: 'Cris', username: 'cris', bio: 'oi', avatar: face }, [OTHER]: { name: 'Davi', username: null, avatar: null } }
+  // Now: the store's rewrite parses the stored copy at the current time.
+  const binding = { ...SNAPSHOT_BINDING, now: Date.now() }
+  const input = { ...binding, log, originals, followed: (a) => a === OWN, blocked: new Set(), profileOf: (a) => profiles[a] }
+  const built = snap.buildScreenSnapshot('diario', input)
+  t.alike(Object.keys(built.body.originals), [STRANGER + ':4', STRANGER + ':3', OTHER + ':1'], 'the originals of a stranger nobody follows are kept')
+  t.alike(built.body.names, [
+    { author: STRANGER, name: 'Cris', username: 'cris', avatar: face },
+    { author: OTHER, name: 'Davi', username: null, avatar: null }
+  ], 'one name per author, with the avatar the post rows lack')
+  const blocked = snap.buildScreenSnapshot('diario', { ...input, blocked: new Set([STRANGER]) })
+  t.alike(Object.keys(blocked.body.originals), [OTHER + ':1'], 'a blocked stranger\'s originals are not stored')
+  t.alike(blocked.body.names.map((n) => n.author), [OTHER], 'nor the name')
+  t.alike(blocked.body.rows.map((r) => r.seq), [9, 8, 7, 6], 'the own rows are the page as read')
+
+  const { texts, raw } = memoryStore()
+  const store = snap.createScreenSnapshotStore(raw)
+  t.teardown(() => caches.wipeLocalCaches())
+  t.ok(store.saveScreenSnapshot('diario', built, caches.cacheGeneration()))
+  const text = texts.get('diario')
+  caches.keepOnlyAuthors(new Set([OWN]))
+  t.is(texts.get('diario'), text, 'a follow set without the stranger leaves the stored copy byte for byte')
+  t.alike(store.loadScreenSnapshot('diario', binding), built)
+  caches.dropAuthors([STRANGER])
+  const after = store.loadScreenSnapshot('diario', binding)
+  t.alike(after.body.rows.map((r) => r.seq), [9, 7, 6], 'the own repost of the blocked author goes, the own quote stays')
+  t.alike(Object.keys(after.body.originals), [OTHER + ':1'], 'the blocked author\'s originals go')
+  t.alike(after.body.names.map((n) => n.author), [OTHER], 'and the name')
+})
+
+test('a stored diário from before the names still seeds the page', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const built = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: logOf([postRow(5)], true), originals: new Map() })
+  const old = JSON.parse(JSON.stringify(built))
+  delete old.body.names
+  const parsed = snap.parseScreenSnapshot(JSON.stringify(old), 'diario', SNAPSHOT_BINDING)
+  t.ok(parsed, 'a four-key body parses')
+  t.alike(parsed.body.names, [])
+  const seed = helper('diarioSeed')(parsed)
+  t.alike(seed.data.rows.map((r) => r.seq), [5])
+  t.alike(seed.names, [], 'no names to seed')
+})
+
+test('diarioSeed returns the stored names, and the screen seeds them before the first paint', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const face = { core: '56'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 2, bytes: 40000, sha256: '78'.repeat(32), width: 512, height: 512 }
+  const log = logOf([repostRow(9, true, { author: STRANGER, seq: 3 }), postRow(5)], true)
+  const profiles = { [STRANGER]: { name: 'Cris', username: 'cris', avatar: face } }
+  const built = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log, originals: new Map([[STRANGER + ':3', post(STRANGER, 3)]]), profileOf: (a) => profiles[a] })
+  const seed = seedOf(snap, built)
+  t.alike(seed.names, [[STRANGER, { name: 'Cris', username: 'cris', avatar: face }]], 'names.seedMany pairs')
+  t.ok(/const \[boot\] = useState\(\(\) => readDiarioSeed\(binding, acting\)\)/.test(screen))
+  t.ok(/useLayoutEffect\(\(\) => \{\s+if \(boot !== null && boot\.names\.length > 0\) names\.seedMany\(boot\.names\)\s+\}, \[\]\)/.test(screen), 'seeded once, absent-only, in a layout effect')
+})
+
+test('both diario builds store names, and a stranger\'s quoted or reposted media use the copy store', (t) => {
+  const builds = writeSnapshot.split("buildScreenSnapshot('diario', {").slice(1).map((b) => b.slice(0, b.indexOf('})')))
+  t.is(builds.length, 2, 'the page and the kept copy')
+  for (const b of builds) t.ok(/blocked: l\.blocked,\s+profileOf: l\.profileOf\s*$/.test(b), 'the build gets the names cache')
+  t.ok(/latestRef\.current = \{[^}]*profileOf \}/.test(screen), 'the newest profileOf at write time')
+  const rowsAt = screen.indexOf('renderRef.current = ({ item: row }) => {')
+  const render = screen.slice(rowsAt, screen.indexOf('\n  }\n', rowsAt))
+  const calls = render.match(/socialRowProps\(\{[^}]*\}\)/g)
+  t.is(calls.length, 2, 'the repost row and the own post row')
+  for (const c of calls) t.ok(c.includes("strangerPersist: 'copy'"), 'a stranger\'s photos and avatar go to and come from the copy store')
 })

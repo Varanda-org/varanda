@@ -39,7 +39,7 @@
 // (../ui/MomentosStrip), read with moments.read again when this tab shows, on
 // a refresh and after a moment is created or deleted (momentsChanged).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -1596,15 +1596,17 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // the previews button opens this post with the newest comment in focus.
 // Diário, Busca and the Espiadinha pass none: their rows stay comment rows.
 // `strangerPersist`: the persist of the row's own avatar, photos and link
-// image when its author is neither own nor followed (false: never kept). Only
-// the Espiadinha passes 'peek', for the rows of its first page (the ones it
-// may store); such a row's quoted post, when its author is not followed
-// either, keeps its photos and avatar the same way.
+// image when its author is neither own nor followed (false: never kept). The
+// Espiadinha passes 'peek', for the rows of its first page (the ones it may
+// store); A Rua's member list and its cold-start preview pass 'copy', so a
+// stranger original paints from the stored copy. Such a row's quoted post,
+// when its author is not followed either, keeps its photos and avatar the
+// same way.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null, strangerPersist = false }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
-  const quotePersist = quoteRef !== null ? social.persistOf(post.quote.author) || (strangerPersist === 'peek' ? 'peek' : false) : null
+  const quotePersist = quoteRef !== null ? social.persistOf(post.quote.author) || (strangerPersist === 'peek' || strangerPersist === 'copy' ? strangerPersist : false) : null
   const q = quoteRef !== null ? social.original(quoteRef) : undefined
   const qp = quoteRef !== null ? profileOf(post.quote.author) || null : null
   const qAvatarView = quoteRef !== null ? avatarOf(post.quote.author) : undefined
@@ -1909,7 +1911,7 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
 // A fold row of foldFeed: the post under 'Ana comentou' with its comment
 // lines, or, while the post's ancestors are read (state 'pending'), the
 // commenter's line over a loading card.
-function foldRowView (item, { social, profileOf, now, ownKey, h, cache, persist }) {
+function foldRowView (item, { social, profileOf, now, ownKey, h, cache, persist, strangerPersist = false }) {
   if (item.state === 'pending') {
     const reply = item.reply || {}
     // The card's own naming rule: a peer whose name reads as 'Você' is shown
@@ -1922,7 +1924,7 @@ function foldRowView (item, { social, profileOf, now, ownKey, h, cache, persist 
     return <RepostPlaceholder verb='comentou' repostedBy={by} missing={false} transient={false} onOpenReposter={open} />
   }
   const post = item.post
-  return <PostRow {...socialRowProps({ post, ref: item.root, social, profileOf, now, ownKey, h, persist: persist === true ? true : social.persistOf(post.author), cache, rowKey: item.key, fold: item })} />
+  return <PostRow {...socialRowProps({ post, ref: item.root, social, profileOf, now, ownKey, h, persist: persist === true ? true : social.persistOf(post.author), cache, rowKey: item.key, fold: item, strangerPersist })} />
 }
 
 // The transient error line of a failed toggle (when the shell gives no toast).
@@ -2595,17 +2597,21 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // read ends page and details; Momentos settles independently.
   const bootRef = useRef({ page: false, details: false, moments: false })
   const socialState = social.social
-  // Snapshot rows settle page and details, but the cover still waits for
-  // Momentos. Names are seeds only; the live page still reads the profiles.
-  useEffect(() => {
+  // Names are seeds only; the live page still reads the profiles. Seeded
+  // before the first paint, so the stored rows show photo and name at once.
+  useLayoutEffect(() => {
     // The seeded strip's names, only for authors the cache does not know.
     if (boot.moments !== null) seedMany(boot.moments.names.map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }]))
+    // Only authors the cache does not know: a remount must not bring back
+    // an older name or photo over one read since.
+    if (boot.snapshot !== null) seedMany(Object.entries(boot.snapshot.names))
+  }, [])
+  // Snapshot rows settle page and details, but the cover still waits for
+  // Momentos.
+  useEffect(() => {
     const snapshot = boot.snapshot
     if (snapshot === null) return
     perfMarks().mark('rows-snapshot')
-    // Only authors the cache does not know: a remount must not bring back
-    // an older name or photo over one read since.
-    seedMany(Object.entries(snapshot.names))
     const b = bootRef.current
     if (typeof onBoot !== 'function' || b.details) return
     b.page = true
@@ -3179,7 +3185,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   renderRef.current = ({ item }) => {
-    if (item.kind === 'comentarios') return foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache })
+    if (item.kind === 'comentarios') return foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, strangerPersist: 'copy' })
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
@@ -3195,9 +3201,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })} />
     }
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })} />
   }
 
   return (
@@ -3278,7 +3284,9 @@ function previewSocial (snapshot) {
     original: (ref) => originals.get(ref),
     transient: () => false,
     pending: () => false,
-    persistOf: () => true,
+    // No follow list here: an original or quote without its own persist
+    // paints from the stored copies.
+    persistOf: () => 'copy',
     retry: noop,
     toggle: noop,
     profileOf: (author) => (names.has(author) ? names.get(author) : undefined),
@@ -3350,16 +3358,18 @@ export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollF
   const renderItem = useCallback(({ item }) => {
     let row
     if (item.kind === 'comentarios') {
-      row = foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true })
+      // No forced persist: a fold root may be a stranger's post, whose photos
+      // the live list kept in the copy kinds. 'copy' reads the main kind first.
+      row = foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, strangerPersist: 'copy' })
     } else if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
       const post = view.original(ref)
       row = post
-        ? <PostRow {...socialRowProps({ post, ref, repostedBy, social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, fold: fold.attached.get(feedKey(item)) || null })} />
+        ? <PostRow {...socialRowProps({ post, ref, repostedBy, social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })} />
         : <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={false} />
     } else {
-      row = <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, fold: fold.attached.get(feedKey(item)) || null })} />
+      row = <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })} />
     }
     // box-only: the row is the touch target and has no handler, so a tap does
     // nothing while a drag still scrolls the list.

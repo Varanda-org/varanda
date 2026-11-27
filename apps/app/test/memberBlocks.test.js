@@ -229,9 +229,111 @@ test('a control block.list leaves at once while five visible reads are in flight
   t.alike(calls.slice(6).map((c) => c.method), ['feed.read', 'block.list'], 'and leave after the read queued before it')
 })
 
+// The provider's commit, reload, effects and setBlock, compiled from their own
+// text over stub refs: what each answer leaves stored.
+async function blocksHarness () {
+  const { blockedSetOf } = await load()
+  const names = ['isLatestReload', 'rereadsAfterWrites', 'nextLoadState']
+  const texts = names.map((n) => new RegExp('\\nexport (function ' + n + ' \\([^)]*\\) \\{\\n[\\s\\S]*?\\n\\}\\n)').exec(PROVIDER)[1])
+  // eslint-disable-next-line no-new-func
+  const helpers = new Function(texts.join('\n') + '\nreturn { ' + names.join(', ') + ' }')()
+  const answers = []
+  const saves = []
+  const effects = []
+  const h = {
+    saves,
+    answers,
+    wipe: 0,
+    keysRef: { current: new Set() },
+    listedRef: { current: false },
+    trustedRef: { current: false },
+    requestRef: {
+      current: (method) => method === 'block.set'
+        ? Promise.resolve({})
+        : new Promise((resolve) => answers.push(resolve))
+    }
+  }
+  const deps = {
+    ...helpers,
+    useCallback: (fn) => fn,
+    useEffect: (fn, list) => effects.push({ fn, list }),
+    newlyBlocked: () => [],
+    dropAuthors: () => {},
+    liveWipeRef: { current: -1 },
+    wipeEpoch: () => h.wipe,
+    setKeys: () => {},
+    reportBlocks: () => {},
+    epochRef: { current: 0 },
+    reloadSeqRef: { current: 0 },
+    writesRef: { current: 0 },
+    requestRef: h.requestRef,
+    setLoadState: () => {},
+    blockedSetOf,
+    noteBlocksKnown: () => {},
+    keysRef: h.keysRef,
+    listedRef: h.listedRef,
+    trustedRef: h.trustedRef,
+    saveQuietList: (kind, binding, keys) => { saves.push([kind, [...keys]]) },
+    bindingRef: { current: {} },
+    markedRef: { current: true },
+    perfMarks: () => ({ mark: () => {} }),
+    ready: false,
+    node: { epoch: 0 },
+    generation: 0,
+    noop: () => {},
+    sessionKey: null,
+    openPushLists: () => {},
+    mayStore: true,
+    bindingKey: 'b',
+    setChanged: () => {}
+  }
+  const body = between(PROVIDER, 'const commit = useCallback', 'const refresh = useCallback')
+  // eslint-disable-next-line no-new-func
+  const out = new Function(...Object.keys(deps), body + '\nreturn { reload, setBlock }')(...Object.values(deps))
+  h.reload = out.reload
+  h.setBlock = out.setBlock
+  h.storeEffect = () => effects.find((e) => e.list.includes('b') && e.list.includes(true)).fn()
+  return h
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+
+test('blocksProvider: a block.list answer that is not a key array is never stored', async (t) => {
+  for (const malformed of [{}, { keys: 'x' }, null]) {
+    const h = await blocksHarness()
+    const read = h.reload()
+    h.answers[0](malformed)
+    await read
+    t.is(h.keysRef.current.size, 0, 'the screens read no blocks')
+    t.is(h.listedRef.current, false, 'nor a list for the web worker')
+    t.alike(h.saves, [], 'not stored by the reload')
+    h.storeEffect()
+    t.alike(h.saves, [], 'nor once storing is allowed')
+    await h.setBlock(A, true)
+    t.ok(h.keysRef.current.has(A))
+    t.alike(h.saves, [], 'nor by a later set')
+  }
+  const h = await blocksHarness()
+  const read = h.reload()
+  h.answers[0]({ keys: [B] })
+  await read
+  t.alike(h.saves, [['bloqueios', [B]]], 'a key array is stored')
+  h.storeEffect()
+  await h.setBlock(A, true)
+  t.alike(h.saves.slice(1), [['bloqueios', [B]], ['bloqueios', [B, A]]], 'and stored again by the effect and a set')
+  const again = h.reload()
+  h.answers[1]({ keys: 'x' })
+  await again
+  h.storeEffect()
+  await h.setBlock(C, true)
+  t.is(h.saves.length, 3, 'a malformed answer after a good one stores nothing more')
+  t.ok(/registerLocalCache\(\{ wipe: \(\) => \{ trustedRef\.current = false \} \}\)/.test(PROVIDER), 'a wipe forgets it')
+  await flush()
+})
+
 // The provider's own commit, reload and session-open effect, run from its
 // source text against a stubbed node and worker.
-async function blocksHarness (answers) {
+async function pushHarness (answers) {
   const { blockedSetOf } = await load()
   const slice = (from, to) => {
     const start = PROVIDER.indexOf(from)
@@ -241,9 +343,22 @@ async function blocksHarness (answers) {
   const commitText = slice('const commit = useCallback(', '}, [])')
   const reloadText = slice('const reload = useCallback(', '}, [commit])')
   const openText = slice('// worker only once one is; a list read before that is sent now.\n  useEffect(', '}, [sessionKey, node.epoch])')
+  const setText = slice('const setBlock = useCallback(', '}, [commit, reload])')
   const reported = []
   const deps = {
-    requestRef: { current: async () => answers.shift() },
+    liveWipeRef: { current: -1 },
+    trustedRef: { current: false },
+    saveQuietList: () => {},
+    bindingRef: { current: {} },
+    // A set always settles; an Error in the answers is a list read that fails.
+    requestRef: {
+      current: async (method) => {
+        if (method === 'block.set') return {}
+        const answer = answers.shift()
+        if (answer instanceof Error) throw answer
+        return answer
+      }
+    },
     epochRef: { current: 0 },
     reloadSeqRef: { current: 0 },
     writesRef: { current: 0 },
@@ -263,16 +378,18 @@ async function blocksHarness (answers) {
     setKeys: () => {},
     reportBlocks: (keys) => reported.push(keys),
     openPushLists: () => {},
-    sessionKey: A
+    sessionKey: A,
+    setChanged: () => {},
+    noop: () => {}
   }
   // eslint-disable-next-line no-new-func
   const make = new Function('deps', 'const {' + Object.keys(deps).join(', ') + '} = deps\n' +
-    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nreturn { reload, open: ' + openText + ' }')
+    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nconst setBlock = ' + setText + '\nreturn { reload, setBlock, open: ' + openText + ' }')
   return { ...make(deps), reported, deps }
 }
 
 test('blocksProvider: a malformed block.list never reaches the worker, as a read or when the account opens', async (t) => {
-  const h = await blocksHarness([{ keys: [A] }, { keys: 'x' }, null])
+  const h = await pushHarness([{ keys: [A] }, { keys: 'x' }, null])
   await h.reload()
   t.alike(h.reported, [[A]], 'a whole list goes to the worker')
   h.open()
@@ -287,11 +404,29 @@ test('blocksProvider: a malformed block.list never reaches the worker, as a read
   h.open()
   t.alike(h.reported, [], 'an empty answer is not a list either')
 
-  const first = await blocksHarness([{ nope: 1 }])
+  const first = await pushHarness([{ nope: 1 }])
   await first.reload()
   first.open()
   t.alike(first.reported, [], 'a malformed first answer sends nothing')
   const src = PROVIDER
   const set = src.slice(src.indexOf('const setBlock = useCallback'))
-  t.ok(/commit\(next\)\s*reportBlocks\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setBlock still goes to the worker')
+  t.ok(/commit\(next\)[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(listedRef\.current\) reportBlocks\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setBlock goes to the worker over a whole list read this run')
+})
+
+test('blocksProvider: a set over a list never read whole this run leaves the worker alone', async (t) => {
+  for (const first of [new Error('offline'), { keys: 'x' }, null]) {
+    const h = await pushHarness([first, { keys: [B, A] }])
+    await h.reload().catch(() => {})
+    h.open()
+    t.alike(h.reported, [], 'no list yet')
+    await h.setBlock(A, true)
+    t.ok(h.deps.keysRef.current.has(A), 'the screens have the key')
+    t.alike(h.reported, [], 'one key would replace the worker\'s whole list')
+    await h.setBlock(A, false)
+    t.alike(h.reported, [], 'nor an undo')
+    await h.reload()
+    t.alike(h.reported, [[B, A]], 'the next whole read reports the list the node holds')
+    await h.setBlock(C, true)
+    t.alike(h.reported, [[B, A], [B, A, C]], 'then a set reports the whole set')
+  }
 })

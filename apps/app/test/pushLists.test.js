@@ -144,12 +144,12 @@ test('a throwing worker or a ready that rejects is harmless', async (t) => {
   await tick()
 })
 
-test('a clear that may not have reached the worker is sent again on each page load until an account opens', async (t) => {
+test('a clear that may not have reached the worker is sent again on each page load until the open account reports both lists', async (t) => {
   const items = setStorage(t)
   setNavigator(t, {})
   const leaving = await freshWeb()
   call(leaving.clearPushLists)
-  t.is(items.get(OWED), '1', 'no worker to take it: the clear is still owed')
+  t.ok(items.get(OWED), 'no worker to take it: the clear is still owed')
 
   let resolveReady
   const ready = new Promise((resolve) => { resolveReady = resolve })
@@ -165,13 +165,47 @@ test('a clear that may not have reached the worker is sent again on each page lo
   globalThis.navigator = { serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } }
   const again = await freshWeb()
   t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'and the one after, at once to a controlling worker')
-  t.is(items.get(OWED), '1', 'sending is no proof the worker kept it')
+  t.ok(items.get(OWED), 'sending is no proof the worker kept it')
 
   call(again.openPushLists)
-  t.absent(items.has(OWED), 'an open account reports its own lists from here on')
+  again.reportBlocks([K])
+  again.reportMutes([M])
+  t.absent(items.has(OWED), 'the open account\'s own lists replaced the old ones')
   sent.length = 0
   await freshWeb()
-  t.alike(sent, [], 'no clear once an account opened')
+  t.alike(sent, [], 'no clear once they did')
+})
+
+test('opening is not enough: the clear stays owed until both lists of the open account were reported', async (t) => {
+  const items = setStorage(t)
+  const sent = controlled(t)
+  const leaving = await freshWeb()
+  call(leaving.clearPushLists)
+  call(leaving.openPushLists)
+  t.ok(items.get(OWED), 'opened, with no list read yet')
+  leaving.reportBlocks([K])
+  t.ok(items.get(OWED), 'the mutes list of the old account may still be there')
+
+  sent.length = 0
+  const reload = await freshWeb()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'the next load sends the clear again')
+  call(reload.openPushLists)
+  reload.reportMutes([M])
+  t.ok(items.get(OWED), 'a load starts over: one list is not both')
+  reload.reportBlocks([K])
+  t.absent(items.has(OWED), 'both lists reported')
+
+  call(reload.clearPushLists)
+  call(reload.openPushLists)
+  reload.reportBlocks([K])
+  t.ok(items.get(OWED), 'a later clear starts the count over')
+  reload.reportMutes([M])
+  t.absent(items.has(OWED), 'and both lists settle it again')
+
+  call(reload.clearPushLists)
+  reload.reportBlocks([K])
+  reload.reportMutes([M])
+  t.ok(items.get(OWED), 'reports with the gate closed never settle it')
 })
 
 test('a report that waits for the worker on a page load still beats the owed clear', async (t) => {
@@ -200,6 +234,104 @@ test('only the clear notes it: reports and the gate never do', async (t) => {
   mod.reportBlocks([K])
   mod.reportMutes([M])
   t.absent(items.has(OWED), 'a lock keeps the lists and sets nothing')
+})
+
+test('a report that never reached a worker leaves the clear owed', async (t) => {
+  const items = setStorage(t)
+  setNavigator(t, {})
+  const none = await freshWeb()
+  call(none.clearPushLists)
+  call(none.openPushLists)
+  none.reportBlocks([K])
+  none.reportMutes([M])
+  t.ok(items.get(OWED), 'no service worker')
+
+  globalThis.navigator = { serviceWorker: { controller: { postMessage () { throw new Error('closed') } } } }
+  const closed = await freshWeb()
+  call(closed.openPushLists)
+  closed.reportBlocks([K])
+  closed.reportMutes([M])
+  t.ok(items.get(OWED), 'a postMessage that throws')
+})
+
+test('a report waiting for the worker settles the clear only once it is posted', async (t) => {
+  const items = setStorage(t)
+  items.set(OWED, 'x')
+  setNavigator(t, { serviceWorker: { controller: null, ready: new Promise(() => {}) } })
+  const stuck = await freshWeb()
+  call(stuck.openPushLists)
+  stuck.reportBlocks([K])
+  stuck.reportMutes([M])
+  await tick()
+  t.is(items.get(OWED), 'x', 'a ready that never settles')
+
+  const sent = []
+  let resolveReady
+  const ready = new Promise((resolve) => { resolveReady = resolve })
+  globalThis.navigator = { serviceWorker: { controller: null, ready } }
+  const mod = await freshWeb()
+  call(mod.openPushLists)
+  mod.reportBlocks([K])
+  mod.reportMutes([M])
+  t.is(items.get(OWED), 'x', 'both reports queued, none posted yet')
+  resolveReady({ active: { postMessage: (m) => sent.push(m) } })
+  await ready
+  await tick()
+  t.alike(sent, [{ type: BLOCKS, keys: [K] }, { type: MUTES, keys: [M] }])
+  t.absent(items.has(OWED), 'both lists posted')
+})
+
+test('a clear from another tab survives this tab\'s reports', async (t) => {
+  const items = setStorage(t)
+  const sent = controlled(t)
+  const mod = await freshWeb()
+  call(mod.clearPushLists)
+  const mine = items.get(OWED)
+  call(mod.clearPushLists)
+  t.not(items.get(OWED), mine, 'each clear writes its own token')
+  call(mod.openPushLists)
+  mod.reportBlocks([K])
+  items.set(OWED, 'other-tab')
+  sent.length = 0
+  mod.reportMutes([M])
+  mod.reportBlocks([K])
+  t.alike(sent, [{ type: MUTES, keys: [M] }, { type: BLOCKS, keys: [K] }], 'the reports still go out')
+  t.is(items.get(OWED), 'other-tab', 'the newer clear stays owed')
+
+  sent.length = 0
+  await freshWeb()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }], 'the next load sends it')
+})
+
+test('after another tab\'s clear, a reopened account settles it only with both lists reported since', async (t) => {
+  const items = setStorage(t)
+  items.set(OWED, 'first')
+  const sent = []
+  let resolveReady
+  const ready = new Promise((resolve) => { resolveReady = resolve })
+  setNavigator(t, { serviceWorker: { controller: null, ready } })
+  const mod = await freshWeb()
+  call(mod.openPushLists)
+  mod.reportBlocks([K])
+  items.set(OWED, 'other-tab')
+  call(mod.openPushLists)
+  mod.reportMutes([M])
+  resolveReady({ active: { postMessage: (m) => sent.push(m) } })
+  await ready
+  await tick()
+  t.alike(sent, [{ type: BLOCKS, keys: [K] }, { type: MUTES, keys: [M] }], 'both posted')
+  t.is(items.get(OWED), 'other-tab', 'the blocks list was reported before this tab saw the newer clear')
+  mod.reportBlocks([K])
+  await tick()
+  t.absent(items.has(OWED), 'reported again, it settles')
+})
+
+test('a clear noted by an older build is still owed at load', async (t) => {
+  const items = setStorage(t)
+  items.set(OWED, '1')
+  const sent = controlled(t)
+  await freshWeb()
+  t.alike(sent, [{ type: BLOCKS, keys: [] }, { type: MUTES, keys: [] }])
 })
 
 test('storage that throws, or none, keeps the clear sent once', async (t) => {

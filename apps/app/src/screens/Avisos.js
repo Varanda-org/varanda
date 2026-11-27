@@ -23,8 +23,9 @@
 // reads the page's notices, once per session.
 // The node's row avatar covers only the blocks it read for the row, so a
 // missing photo is completed from the names cache or one hinted diary.peek of
-// the author's profile block, in memory only, bytes still verified by Avatar.
-// Names come from the item, never from a key. Rules: docs/app.md.
+// the author's profile block. The saved list keeps that same picture, and
+// Avatar keeps the bytes for a reopen (persist 'copy'). Names come from the
+// item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
@@ -191,6 +192,20 @@ function prependNew (currentItems, pageItems) {
   return items.slice().sort(compareNotices)
 }
 
+// The picture the row draws, kept on the copy. A names-cache avatar, null
+// included, wins (pickAvatar); otherwise the node's row photo or the peek map.
+export function noticesForStorage (items, profileOf, avatars) {
+  if (!Array.isArray(items)) return []
+  const of = typeof profileOf === 'function' ? profileOf : () => undefined
+  const map = avatars !== null && typeof avatars === 'object' ? avatars : {}
+  const out = []
+  for (const item of items) {
+    const picture = pickAvatar(of(item.key), rowAvatarSource(item, map[item.key]))
+    out.push({ ...item, avatar: picture })
+  }
+  return out
+}
+
 // The saved personal list for `binding`, every row unverified until a live
 // answer, or null when there is none.
 function seededNotices (binding) {
@@ -204,6 +219,11 @@ function seededNotices (binding) {
 function confirmedNotices (items, unverified) {
   const pending = new Set(unverified)
   return items.filter((item) => !pending.has(noticeId(item)))
+}
+
+function storedNotices (state, held, profileOf, avatars) {
+  const list = prependNew(confirmedNotices(state.items, state.unverified), held).slice(0, 60)
+  return noticesForStorage(list, profileOf, avatars)
 }
 
 // A follow row opens the person's profile. A reply, quote or mention opens
@@ -227,10 +247,10 @@ const AVATAR_BATCH = 10
 
 // The node's row avatar covers only the blocks it read for the row, so a
 // profile with a photo written in between is missed; one diary.peek of the
-// profile block the seeder index names fills it, in memory only, AVATAR_BATCH
-// authors at a time (the index pacer allows 18 starts per 10 s). A batch
-// stays frozen while in flight, so a names-cache commit for one of its
-// authors cannot restart it; a new cycle (once per loadFirst, never per
+// profile block the seeder index names fills it, AVATAR_BATCH authors at a
+// time (the index pacer allows 18 starts per 10 s); the saved copy keeps it
+// (noticesForStorage). A batch stays frozen while in flight, so a names-cache
+// commit for one of its authors cannot restart it; a new cycle (once per loadFirst, never per
 // partial page) restarts it and asks every author again, so a photo set or
 // removed later shows after a reload. A row whose node answer has a photo
 // always wins (rowAvatarSource).
@@ -379,7 +399,7 @@ function useSnippets (items, request, enabled, retryKey) {
 // set the row has no pill, so this only answers a press made mid-request.
 const NO_UNFOLLOW = () => {}
 
-function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread, followBack, followPending, followDisabled, onFollowBack }) {
+function NoticeRow ({ item, now, unread, postText, picture, persistCopy, onOpenMember, onOpenThread, followBack, followPending, followDisabled, onFollowBack }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
@@ -423,7 +443,7 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
   // not its own control. No badge when the kind has no glyph.
   const face = (
     <View style={styles.avatar}>
-      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={picture} persist={false} />
+      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={picture} persist={persistCopy ? 'copy' : false} />
       {icon === null
         ? null
         : (
@@ -578,23 +598,33 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const corePageRef = useRef(corePage)
   corePageRef.current = corePage
   const saveRef = useRef(null)
+  const profileOfRef = useRef(profileOf)
+  profileOfRef.current = profileOf
+  const avatarsRef = useRef({})
+  // The armed answer and what its save last stored (null until one is
+  // written). cancelSave drops it, so a binding change cannot be written again
+  // when a peek lands afterwards.
+  const armedSaveRef = useRef(null)
   const cancelSave = useCallback(() => {
     clearTimeout(saveRef.current)
     saveRef.current = null
+    armedSaveRef.current = null
   }, [])
   const armSave = useCallback((gen, b) => {
     if (b === null || cacheGeneration() !== gen) return
     cancelSave()
+    const armed = { gen, b, stored: null }
+    armedSaveRef.current = armed
     saveRef.current = setTimeout(() => {
       saveRef.current = null
       const now = memberSnapshotBinding({ node: nodeRef.current, acting: actingGet(), pageKey: pageKeyRef.current })
       if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now)) return
       const blocks = blocksRef.current
       if (blocks.loadState !== 'ok') return
-      const current = stateRef.current
-      const notices = prependNew(confirmedNotices(current.items, current.unverified), heldRef.current).slice(0, 60)
+      // Refs: the names cache and the peek map settle after this timer was armed.
+      const notices = storedNotices(stateRef.current, heldRef.current, profileOfRef.current, avatarsRef.current)
       const snapshot = buildScreenSnapshot('avisos', { ...b, notices, blocked: blocks.keys })
-      if (snapshot !== null) saveScreenSnapshot('avisos', snapshot, gen)
+      if (snapshot !== null && saveScreenSnapshot('avisos', snapshot, gen)) armed.stored = JSON.stringify(notices)
     }, 2000)
   }, [cancelSave])
   useEffect(() => cancelSave, [cancelSave])
@@ -1366,6 +1396,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
 
   // A stored row the node has not confirmed yet offers no follow back.
   const pendingRows = new Set(unverified)
+  // Rows read as a Página, also for the one commit after leaving it, are never
+  // stored: their photos stay out of the copy store, and they offer no follow back.
+  const pageRows = pageKey !== null || actingKeyRef.current !== actingKey
   const renderItem = ({ item }) => {
     if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>
     const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
@@ -1376,9 +1409,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         unread={unread.has(item.seen)}
         postText={snippets[snippetRef(item)]}
         picture={picture}
+        persistCopy={!pageRows}
         onOpenMember={onOpenMember}
         onOpenThread={onOpenThread}
-        followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
+        followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageRows, follows, ownKey })}
         followPending={followBackKey !== null && typeof item.key === 'string' && item.key.toLowerCase() === followBackKey}
         followDisabled={followBackKey !== null}
         onFollowBack={followBack}
@@ -1438,6 +1472,18 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // Names, avatars and snippets read through the hosted node's peeks; a core
   // node acting as a Página shows the rows without them.
   const avatars = useRowAvatars(shownItems, profileOf, node.request, active && passkeyHosted && notice === null, avatarCycle)
+  avatarsRef.current = avatars
+  // A peek that lands after the page was armed is still the picture the copy
+  // keeps, and so is a name or picture the names cache settles later (its
+  // profileOf changes with every commit). A pending save reads both when it
+  // fires, so it is not pushed back; after it, only an answer that changes
+  // the stored rows saves again.
+  useEffect(() => {
+    const armed = armedSaveRef.current
+    if (armed === null || saveRef.current !== null) return
+    if (armed.stored !== null && JSON.stringify(storedNotices(stateRef.current, heldRef.current, profileOfRef.current, avatarsRef.current)) === armed.stored) return
+    armSave(armed.gen, armed.b)
+  }, [avatars, profileOf, armSave])
   const snippets = useSnippets(shownItems, node.request, active && passkeyHosted && notice === null, loadedAt)
   // The chips and day headers only change what is drawn: settle, the seen
   // marks and the badge always take the whole loaded list.

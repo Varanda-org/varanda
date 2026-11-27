@@ -29,7 +29,7 @@
 // Only while acting as the member, never in the Vitrine.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
@@ -95,7 +95,7 @@ import { editedRecord } from '../postEdit'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { useMoments, useMomentSeen } from './Momentos'
 import { useBlocks } from '../blocksProvider'
-import { allowedAuthor, cacheGeneration, wipeEpoch } from '../localCaches'
+import { cacheGeneration, deniedAuthor, wipeEpoch } from '../localCaches'
 import { actingAsMember, buildScreenSnapshot } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
@@ -116,14 +116,16 @@ const SNAPSHOT_DEBOUNCE_MS = 2000
 // older live pages appended later are not under the stored rows' rule) and
 // `oldest` (the next `before`: the page's technical records were not kept, so
 // the last row does not bound it).
-// `social` is a useSocial seed with the stored originals only.
+// `social` is a useSocial seed with the stored originals only; `names` the
+// stored names of the originals' authors as names.seedMany pairs.
 export function diarioSeed (snapshot) {
   if (snapshot === null || snapshot.body.rows.length === 0) return null
   const b = snapshot.body
   const rows = b.rows.map((r) => ({ seq: r.seq, entry: { seq: r.seq, record: r.record } }))
   return {
     data: { info: { publicKey: snapshot.owner }, rows, atEnd: b.atEnd, oldest: b.oldest, seeded: true, stored: new Set(rows.map((r) => r.seq)) },
-    social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] }
+    social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] },
+    names: (Array.isArray(b.names) ? b.names : []).map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }])
   }
 }
 
@@ -414,9 +416,11 @@ export function fillSettled (source) {
 }
 
 // `rows` without the own reposts of another author that `allowed` now
-// refuses: a retried save writes rows read before a purge, and the build
-// filters only the originals. As the stored copy's purge (screenSnapshot.js
-// prune), an own quote post stays: only its quoted original goes.
+// refuses (a denied one: the stored copy keeps a stranger's original, so a
+// follow change drops nothing): a retried save writes rows read before a
+// block, and the build filters only the originals. As the stored copy's purge
+// (screenSnapshot.js prune), an own quote post stays: only its quoted
+// original goes.
 export function purgedRows (rows, owner, allowed) {
   const own = owner.toLowerCase()
   return rows.filter((row) => {
@@ -583,7 +587,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const deletedSeqsRef = useRef(new Set())
   const liveMarkedRef = useRef(false)
   const latestRef = useRef(null)
-  latestRef.current = { binding, acting, passkey: node.passkey, originals: social.social.originals, persistOf: social.persistOf, blocked: blocks.keys }
+  latestRef.current = { binding, acting, passkey: node.passkey, originals: social.social.originals, persistOf: social.persistOf, blocked: blocks.keys, profileOf }
   // A save found no publication to store before the end of the diary: the
   // older page that first brings one arms it again.
   const fillSaveRef = useRef(false)
@@ -599,7 +603,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     const deletions = deletionsRef.current
     const deletionPending = deletions !== writtenDeletionsRef.current
     let source = live === null ? null : diarioSnapshotSource(live, dataRef.current)
-    if (source !== null && retried === true) source = { ...source, rows: purgedRows(source.rows, l.binding.owner, allowedAuthor) }
+    if (source !== null && retried === true) source = { ...source, rows: purgedRows(source.rows, l.binding.owner, (a) => !deniedAuthor(a)) }
     const timing = live === null ? 'drop' : diarioSaveTiming({ gen, retried, liveGen: live.gen, liveWipe: live.wipe, generation: cacheGeneration(), wipe: wipeEpoch() })
     const allowed = live !== null && actingAsMember(l.acting) && sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner) &&
       sameSnapshotBinding(live.binding, l.binding) && typeof live.info.publicKey === 'string' && live.info.publicKey.toLowerCase() === l.binding.owner
@@ -634,7 +638,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       log: diarioLogOf({ ...source, rows: publicationRows(source.rows, null) }, l.binding.owner),
       originals: l.originals,
       followed: l.persistOf,
-      blocked: l.blocked
+      blocked: l.blocked,
+      profileOf: l.profileOf
     })
     const write = diarioSnapshotWrite({ built: snapshot, shown: publicationCount(source.rows, null), atEnd: source.atEnd })
     // A pending deletion still clears: the stored copy may hold the post.
@@ -642,14 +647,15 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       fillSaveRef.current = true
       const trimmed = storedCopyRows(seedRowsRef.current, dataRef.current, (ref) => l.originals.get(ref))
       if (trimmed === null) return
-      const rows = purgedRows(trimmed, l.binding.owner, allowedAuthor)
+      const rows = purgedRows(trimmed, l.binding.owner, (a) => !deniedAuthor(a))
       const copy = buildScreenSnapshot('diario', {
         ...l.binding,
         acting: l.acting,
         log: diarioLogOf({ rows: publicationRows(rows, null), atEnd: false }, l.binding.owner),
         originals: l.originals,
         followed: l.persistOf,
-        blocked: l.blocked
+        blocked: l.blocked,
+        profileOf: l.profileOf
       })
       const save = diarioSnapshotWrite({ built: copy, shown: publicationCount(rows, null), atEnd: false }) === 'save'
       seedRowsRef.current = save ? rows : null
@@ -668,6 +674,11 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     snapshotTimer.current = setTimeout(() => writeSnapshot(gen, retried), SNAPSHOT_DEBOUNCE_MS)
   }, [writeSnapshot])
   useEffect(() => () => clearTimeout(snapshotTimer.current), [])
+  // The stored strangers' names, before the first paint, only for authors the
+  // cache does not know; the live rows still read the profiles.
+  useLayoutEffect(() => {
+    if (boot !== null && boot.names.length > 0) names.seedMany(boot.names)
+  }, [])
   useEffect(() => {
     if (boot !== null) perfMarks().mark('rows-snapshot:diario')
   }, [])
@@ -1278,10 +1289,10 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       const repostedBy = { author: info.publicKey, name: 'Você', username: null }
       const post = social.original(ref)
       if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey, strangerPersist: 'copy' })} />
     }
     const post = ownPostOf(info.publicKey, row.seq, record, row.entry.edited)
-    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
+    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey, strangerPersist: 'copy' })} />
   }
 
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3

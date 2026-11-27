@@ -157,7 +157,8 @@ test('conversas: 30 rows, 256 private groups, removal by peer', async (t) => {
   const built = await build('conversas', { rows, groups, requests: true, inboxUnread: true })
   t.is(built.body.rows.length, 30)
   t.is(built.body.groups.length, 256)
-  t.alike(Object.keys(built.body), ['rows', 'groups'], 'requests and inboxUnread are not stored')
+  t.alike(Object.keys(built.body), ['rows', 'groups', 'names'], 'requests and inboxUnread are not stored')
+  t.alike(built.body.names, [], 'no names given, an empty list')
   const small = await build('conversas')
   t.alike(small.body.groups, [{ group: G2, name: 'Segredo' }], 'only the private group, without its other fields')
   t.alike(s.screenWithoutAuthors(small, [STRANGER]).body.rows.map((r) => r.peer), [FOLLOW])
@@ -269,4 +270,225 @@ test('a body that never fits builds nothing', async (t) => {
   t.is(p.conversasCodec.build({ rows: [dmRow(FOLLOW)], groups: [] }, no), null)
   t.is(p.mensagensCodec.build({ peer: FOLLOW, messages: [message(1)], blocked: [] }, no), null)
   t.is(p.grupoMensagensCodec.build({ group: G1, items: [groupItem(1)], blocked: [] }, no), null)
+})
+
+// ---- 'conversas' names and private group pictures
+
+const peerName = (peer, extra = {}) => ({ peer, name: 'Bia', username: 'bia', avatar: null, peeked: true, verifiedAt: NOW, ...extra })
+const PEER_NAME_KEYS = ['peer', 'name', 'username', 'avatar', 'peeked', 'verifiedAt']
+const PICTURE_AUTHOR = 'ab'.repeat(32)
+const groupPicture = { core: '99'.repeat(32), mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: '78'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), plainMime: 'image/jpeg', plainSha256: '9b'.repeat(32), w: 512, h: 512, ms: 0 }
+const pictured = (extra = {}) => ({ community: null, group: G2, role: 'member', general: false, visibility: 'private', name: 'Segredo', image: groupPicture, imageAuthor: PICTURE_AUTHOR.toUpperCase(), ...extra })
+const conversasBody = async (extra = {}) => JSON.parse(JSON.stringify((await build('conversas', extra)).body))
+
+test('conversas: a name per stored row round-trips, in the order of the rows', async (t) => {
+  const s = await loadRules()
+  const built = await build('conversas', { names: [peerName(STRANGER, { username: null, avatar, peeked: false }), peerName(FOLLOW)] })
+  t.alike(Object.keys(built.body), ['rows', 'groups', 'names'])
+  t.alike(built.body.names, [peerName(FOLLOW), peerName(STRANGER, { username: null, avatar, peeked: false })])
+  for (const n of built.body.names) t.alike(Object.keys(n), PEER_NAME_KEYS, 'exactly the six keys, in order')
+  t.alike(await reparse(built, 'conversas'), built, 'parses back the same')
+  const { verifiedAt, ...fields } = peerName(FOLLOW)
+  const byMap = await build('conversas', { names: new Map([[FOLLOW, { ...fields, verifiedAt }], [STRANGER, peerName(FOLLOW)]]) })
+  t.alike(byMap.body.names, [peerName(FOLLOW)], 'a Map keyed by peer; an entry naming another peer is left out')
+  const byObject = await build('conversas', { names: { [STRANGER]: { name: 'Leo', username: null, avatar: null, peeked: false, verifiedAt } } })
+  t.alike(byObject.body.names, [peerName(STRANGER, { name: 'Leo', username: null, peeked: false })], 'an object keyed by peer')
+  const store = s.createScreenSnapshotStore({ load: () => null, save: () => {}, clear: () => {} })
+  t.ok(store, 'the codec registers like the other kinds')
+})
+
+test('conversas: names only for stored, unblocked rows; a bad entry is skipped and extra fields never enter', async (t) => {
+  const none = await build('conversas', { names: [peerName(OTHER)] })
+  t.alike(none.body.names, [], 'a name for a peer without a row is skipped')
+  const blocked = await build('conversas', { blocked: [FOLLOW], names: [peerName(FOLLOW), peerName(STRANGER)] })
+  t.alike(blocked.body.rows.map((r) => r.peer), [STRANGER], 'the blocked peer row is left out')
+  t.alike(blocked.body.names.map((n) => n.peer), [STRANGER], 'and so is the blocked peer name')
+  const upper = await build('conversas', { blocked: [FOLLOW.toUpperCase()], names: [peerName(FOLLOW)] })
+  t.alike(upper.body.names, [], 'the block list is case-insensitive')
+  const skipped = [
+    peerName(FOLLOW, { name: null, username: null, avatar: null }),
+    peerName(FOLLOW, { username: 'Not Valid' }),
+    peerName(FOLLOW, { name: 'x'.repeat(161) }),
+    peerName(FOLLOW, { peeked: 'yes' }),
+    peerName(FOLLOW, { verifiedAt: undefined }),
+    peerName(FOLLOW, { verifiedAt: -1 }),
+    peerName(FOLLOW, { verifiedAt: NOW - 15 * DAY }),
+    peerName(FOLLOW, { verifiedAt: NOW + 2 * DAY }),
+    peerName(FOLLOW.toUpperCase()),
+    'Bia',
+    null
+  ]
+  for (const raw of skipped) t.alike((await build('conversas', { names: [raw] })).body.names, [], 'skipped: ' + JSON.stringify(raw))
+  const loose = await build('conversas', { names: [{ peer: FOLLOW, name: 'Bia', peeked: true, verifiedAt: NOW, avatar: { core: 'x' }, bio: 'oi', key: '34'.repeat(32), nonce: '56'.repeat(24), secret: 'x' }] })
+  t.alike(loose.body.names, [peerName(FOLLOW, { username: null })], 'a missing username reads null, a bad avatar null, every other field dropped')
+  const twice = await build('conversas', { names: [peerName(FOLLOW), peerName(FOLLOW, { name: 'Outra' })] })
+  t.alike(twice.body.names, [peerName(FOLLOW)], 'the first entry of a peer wins')
+  t.alike((await build('conversas', { names: 'Bia' })).body.names, [], 'names of the wrong type: none')
+})
+
+test('conversas: strict names; an old two-key copy parses with names: []', async (t) => {
+  const p = await loadPrivate()
+  const parse = (body, now = NOW) => p.conversasCodec.parse(JSON.parse(JSON.stringify(body)), { now })
+  const old = await conversasBody()
+  delete old.names
+  const fromOld = parse(old)
+  t.alike(Object.keys(fromOld), ['rows', 'groups', 'names'], 'the canonical order')
+  t.alike(fromOld.names, [])
+  const env = JSON.parse(JSON.stringify(await build('conversas')))
+  delete env.body.names
+  t.alike((await reparse(env, 'conversas')).body.names, [], 'an old envelope too')
+  const body = await conversasBody({ names: [peerName(FOLLOW, { avatar })] })
+  t.alike(parse(body).names.length, 1)
+  const bad = [
+    (b) => { b.names[0].bio = 'oi' },
+    (b) => { b.names[0].key = '34'.repeat(32) },
+    (b) => { delete b.names[0].verifiedAt },
+    (b) => { delete b.names[0].peeked },
+    (b) => { b.names[0].peeked = 1 },
+    (b) => { b.names[0].avatar = { ...avatar, width: 64 } },
+    (b) => { b.names[0].username = 'X' },
+    (b) => { b.names[0].name = null; b.names[0].username = null; b.names[0].avatar = null },
+    (b) => { b.names[0].peer = OTHER },
+    (b) => { b.names.push({ ...b.names[0] }) },
+    (b) => { b.names = Array.from({ length: 31 }, () => b.names[0]) },
+    (b) => { b.names = {} },
+    (b) => { b.names = null },
+    (b) => { b.extra = [] },
+    (b) => { delete b.groups }
+  ]
+  for (const change of bad) {
+    const copy = JSON.parse(JSON.stringify(body))
+    change(copy)
+    t.is(parse(copy), null, 'refused: ' + change.toString())
+  }
+  t.alike(parse(body, NOW + 15 * DAY).names, [], 'a name verified more than 14 days ago is dropped, not refused')
+  t.alike(parse(body, NOW + 13 * DAY).names.length, 1)
+  const older = JSON.parse(JSON.stringify(await build('conversas', { names: [peerName(FOLLOW, { verifiedAt: NOW - 10 * DAY })] })))
+  const later = await reparse(older, 'conversas', { now: NOW + 5 * DAY })
+  t.ok(later, 'the envelope is still within its days')
+  t.alike(later.body.names, [], 'while the name verified 15 days ago is gone')
+})
+
+test('conversas: a block drops the removed peer name with its row', async (t) => {
+  const s = await loadRules()
+  const built = await build('conversas', { names: [peerName(FOLLOW), peerName(STRANGER)] })
+  const after = s.screenWithoutAuthors(built, [STRANGER.toUpperCase()])
+  t.alike(after.body.rows.map((r) => r.peer), [FOLLOW])
+  t.alike(after.body.names.map((n) => n.peer), [FOLLOW])
+  t.alike(Object.keys(after.body), ['rows', 'groups', 'names'])
+  const old = JSON.parse(JSON.stringify(built))
+  delete old.body.names
+  t.alike(s.screenWithoutAuthors(old, [STRANGER]).body.names, [], 'an old body comes out with names: []')
+  t.alike(s.screenKeepOnlyAuthors(built, []), built, 'an unfollow changes nothing')
+})
+
+test('conversas: rows cut to fit take their names; 30 rows with names stay within the cap', async (t) => {
+  const p = await loadPrivate()
+  const rows = Array.from({ length: 30 }, (_, i) => dmRow(peerKey(i), i + 1))
+  const long = '😀'.repeat(80)
+  const names = rows.map((r) => peerName(r.peer, { name: long, username: 'u' + 'x'.repeat(19), avatar }))
+  const full = await build('conversas', { rows, names })
+  t.ok(full, 'built')
+  t.ok(Buffer.byteLength(JSON.stringify(full)) <= p.CONVERSAS_MAX_BYTES, 'within the byte cap')
+  t.is(full.body.rows.length, 30)
+  t.alike(full.body.names.map((n) => n.peer), full.body.rows.map((r) => r.peer), 'one name per row, in order')
+  const groups = Array.from({ length: 256 }, (_, i) => pictured({ group: hex(i + 1, 64), name: long }))
+  const crowded = await build('conversas', { rows, names, groups })
+  t.ok(crowded, 'built')
+  t.ok(Buffer.byteLength(JSON.stringify(crowded)) <= p.CONVERSAS_MAX_BYTES, 'still within the byte cap')
+  t.alike(crowded.body.rows, [], 'every row goes before a group does')
+  t.alike(crowded.body.names, [], 'and every name with its row')
+  t.ok(crowded.body.groups.length > 0 && crowded.body.groups.length < 256, 'then groups are cut')
+  const short = await build('conversas', { rows, names, groups: groups.map((g, i) => ({ ...g, name: 'g' + i })) })
+  t.is(short.body.rows.length, 30, '30 named rows beside 256 pictured groups of short names fit whole')
+  t.is(short.body.names.length, 30)
+  const some = await build('conversas', { rows, names, groups: groups.map((g) => ({ ...g, name: 'g'.repeat(40) })) })
+  t.ok(Buffer.byteLength(JSON.stringify(some)) <= p.CONVERSAS_MAX_BYTES)
+  t.ok(some.body.rows.length > 0 && some.body.rows.length < 30, 'some rows cut')
+  t.is(some.body.groups.length, 256, 'no group cut while a row could go')
+  t.alike(some.body.names.map((n) => n.peer), some.body.rows.map((r) => r.peer), 'a cut row took its name with it')
+  const limit = JSON.stringify({ rows: rows.slice(0, 5), groups: [], names: names.slice(0, 5) }).length
+  const cut = p.conversasCodec.build({ rows, names, groups: [], blocked: [] }, { fits: (b) => JSON.stringify(b).length <= limit, now: NOW })
+  t.is(cut.rows.length, 5)
+  t.alike(cut.names.map((n) => n.peer), rows.slice(0, 5).map((r) => r.peer))
+})
+
+test('conversas: a private group picture is kept only as its plainSha256 and author', async (t) => {
+  const s = await loadRules()
+  const p = await loadPrivate()
+  const built = await build('conversas', { groups: [pictured(), pictured({ group: G1, image: { ...groupPicture, plainMime: 'image/png' } })] })
+  t.alike(built.body.groups, [
+    { group: G2, name: 'Segredo', thumb: '9b'.repeat(32), thumbAuthor: PICTURE_AUTHOR },
+    { group: G1, name: 'Segredo' }
+  ], 'the pair only for a valid private group picture; the author lowercased')
+  t.alike(Object.keys(built.body.groups[0]), ['group', 'name', 'thumb', 'thumbAuthor'])
+  t.absent(/"(key|nonce|core|image|imageAuthor)"/.test(JSON.stringify(built)), 'what decrypts or fetches the picture never enters')
+  t.alike(await reparse(built, 'conversas'), built, 'parses back the same')
+  const blocked = await build('conversas', { groups: [pictured()], blocked: [PICTURE_AUTHOR] })
+  t.alike(blocked.body.groups, [{ group: G2, name: 'Segredo' }], 'a blocked author stores no picture')
+  const noAuthor = await build('conversas', { groups: [pictured({ imageAuthor: 'xyz' })] })
+  t.alike(noAuthor.body.groups, [{ group: G2, name: 'Segredo' }], 'an invalid author stores no picture')
+  const stripped = s.screenWithoutAuthors(built, [PICTURE_AUTHOR])
+  t.alike(stripped.body.groups, [{ group: G2, name: 'Segredo' }, { group: G1, name: 'Segredo' }], 'a block keeps the group without the picture')
+  t.alike(s.screenWithoutAuthors(built, [OTHER]).body.groups, built.body.groups, 'another key leaves it')
+  const body = built.body
+  const parse = (change) => {
+    const copy = JSON.parse(JSON.stringify(body))
+    change(copy)
+    return p.conversasCodec.parse(copy, { now: NOW })
+  }
+  t.is(parse((b) => { delete b.groups[0].thumbAuthor }), null, 'a 3-key entry is refused')
+  t.is(parse((b) => { b.groups[0].thumbAuthor = 'xyz' }), null, 'a bad author')
+  t.is(parse((b) => { b.groups[0].thumb = 'ZZ' }), null, 'a bad thumb')
+  t.is(parse((b) => { b.groups[0].key = b.groups[0].thumb; delete b.groups[0].thumb }), null, 'a key in place of the thumb')
+  t.is(parse((b) => { b.groups[0].core = '99'.repeat(32) }), null, 'a fifth key')
+  t.alike(parse((b) => { b.groups[0] = { group: G2, name: 'Segredo' } }).groups[0], { group: G2, name: 'Segredo' }, 'an old 2-key entry still parses')
+})
+
+test('conversas: a stored group rebuilt before the group read keeps its stored pair', async (t) => {
+  const stored = { group: G2, name: 'Segredo', thumb: '9b'.repeat(32), thumbAuthor: PICTURE_AUTHOR, visibility: 'private' }
+  const built = await build('conversas', { groups: [stored] })
+  t.alike(built.body.groups, [{ group: G2, name: 'Segredo', thumb: '9b'.repeat(32), thumbAuthor: PICTURE_AUTHOR }], 'the stored pair stays')
+  const blocked = await build('conversas', { groups: [stored], blocked: [PICTURE_AUTHOR] })
+  t.alike(blocked.body.groups, [{ group: G2, name: 'Segredo' }], 'not for a blocked author')
+  for (const [label, extra] of [
+    ['a live row without its picture', { image: null }],
+    ['a row with an image author but no image', { imageAuthor: PICTURE_AUTHOR }],
+    ['a live row whose picture is not a private one', { image: { ...groupPicture, plainMime: 'image/png' }, imageAuthor: PICTURE_AUTHOR }],
+    ['an upper-case author', { thumbAuthor: PICTURE_AUTHOR.toUpperCase() }],
+    ['a bad thumb', { thumb: 'ZZ' }]
+  ]) {
+    const out = await build('conversas', { groups: [{ ...stored, ...extra }] })
+    t.alike(out.body.groups, [{ group: G2, name: 'Segredo' }], label + ' carries no pair')
+  }
+  const live = await build('conversas', { groups: [{ ...pictured(), thumb: 'cd'.repeat(32), thumbAuthor: OTHER }] })
+  t.alike(live.body.groups, [{ group: G2, name: 'Segredo', thumb: '9b'.repeat(32), thumbAuthor: PICTURE_AUTHOR }], 'a live picture wins over a stray pair')
+})
+
+test('conversas: save and load round-trip; load rewrites an old copy with names: []', async (t) => {
+  const s = await loadRules()
+  const { cacheGeneration, dropAuthors } = await import('../src/localCaches.js')
+  const map = new Map()
+  const raw = { load: (kind) => (map.has(kind) ? map.get(kind) : null), save: (kind, text) => { map.set(kind, text) }, clear: (kind) => { map.delete(kind) } }
+  const store = s.createScreenSnapshotStore(raw)
+  const live = bind()
+  const snap = await build('conversas', { groups: [pictured()], names: [peerName(FOLLOW), peerName(STRANGER, { avatar })] })
+  t.is(store.saveScreenSnapshot('conversas', snap, cacheGeneration()), true)
+  t.alike(store.loadScreenSnapshot('conversas', live), snap, 'loads back the same')
+  t.is(map.get('conversas'), JSON.stringify(snap))
+
+  const old = JSON.parse(JSON.stringify(snap))
+  delete old.body.names
+  map.set('conversas', JSON.stringify(old))
+  const loaded = store.loadScreenSnapshot('conversas', live)
+  t.alike(loaded.body.names, [])
+  t.is(map.get('conversas'), JSON.stringify(loaded), 'the stored text is rewritten canonically')
+  t.ok(map.get('conversas').endsWith(',"names":[]}}'))
+
+  t.is(store.saveScreenSnapshot('conversas', snap, cacheGeneration()), true)
+  dropAuthors([STRANGER, PICTURE_AUTHOR])
+  const after = store.loadScreenSnapshot('conversas', live)
+  t.alike(after.body.rows.map((r) => r.peer), [FOLLOW])
+  t.alike(after.body.names.map((n) => n.peer), [FOLLOW], 'a block removes the stored name')
+  t.alike(after.body.groups, [{ group: G2, name: 'Segredo' }], 'and the stored picture of a blocked author')
 })

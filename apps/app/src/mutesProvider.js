@@ -8,11 +8,13 @@
 // passkey (`refresh`, after a seen pass), so the shell reloads A Rua once per
 // change. Each list also goes to the web service worker, which keeps a muted
 // person's pushes quiet as it does a blocked one's (pushBlocks.web.js).
+// The last list read live is stored and used at once on a reopen, as the
+// block list is (blocksProvider.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useNode } from './node'
 import { mutedSetOf } from './memberMutes'
-import { isLatestReload, rereadsAfterWrites } from './blocksProvider'
+import { isLatestReload, rereadsAfterWrites, saveQuietList, useQuietSeed } from './blocksProvider'
 import { openPushLists, reportMutes } from './pushBlocks'
 import { registerLocalCache, wipeEpoch } from './localCaches'
 
@@ -41,7 +43,7 @@ export function useMutes () {
   return useContext(MutesContext)
 }
 
-export function MutesProvider ({ children }) {
+export function MutesProvider ({ children, bindingOf }) {
   const node = useNode()
   const available = node.hosted === true
   const generation = node.passkey ? node.passkey.generation : 0
@@ -59,10 +61,33 @@ export function MutesProvider ({ children }) {
   // may go to the web worker again when an account opens.
   const listedRef = useRef(false)
   useEffect(() => registerLocalCache({ wipe: () => { listedRef.current = false } }), [])
+  // As in BlocksProvider: only a list from a key array is stored.
+  const trustedRef = useRef(false)
+  useEffect(() => registerLocalCache({ wipe: () => { trustedRef.current = false } }), [])
   const sessionKey = sessionKeyOf(node.passkey ? node.passkey.status : null)
+
+  const { binding, bindingKey, seed, forget, mayStore } = useQuietSeed(bindingOf, node.passkey ? node.passkey.status : null, node.config)
+  const bindingRef = useRef(binding)
+  bindingRef.current = binding
+  // As in BlocksProvider: a stored list never replaces what a live answer
+  // or a set brought, and adopting it reports nothing.
+  const adoptedRef = useRef(null)
+  const liveWipeRef = useRef(-1)
+  if (seed !== null && adoptedRef.current !== seed && liveWipeRef.current !== wipeEpoch()) {
+    adoptedRef.current = seed
+    keysRef.current = seed.mutes
+    setKeys(seed.mutes)
+  }
+  useEffect(() => registerLocalCache({
+    wipe: () => {
+      adoptedRef.current = null
+      forget()
+    }
+  }), [forget])
 
   const commit = useCallback((next) => {
     keysRef.current = next
+    liveWipeRef.current = wipeEpoch()
     setKeys(next)
   }, [])
 
@@ -76,14 +101,19 @@ export function MutesProvider ({ children }) {
     const answer = await requestRef.current('mute.list', {}, { priority: 'control' })
     if (!alive() || !isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)) return
     if (rereadsAfterWrites(writes, writesRef.current)) return reload(alive)
+    // An answer asked before a wipe may be the previous account's list:
+    // committed, it would also stop the new identity's stored list from
+    // being adopted. Read again (a read, never a write), as block.list does.
+    if (wipeEpoch() !== wiped) return reload(alive)
     commit(mutedSetOf(answer))
     // A malformed answer reads as no mutes on screen, but as "nobody muted"
-    // the web worker would show their pushes: it keeps the last whole list.
+    // the web worker would show their pushes: it keeps the last whole list,
+    // and nothing is stored.
     const listed = Boolean(answer && Array.isArray(answer.keys))
     if (listed) reportMutes([...keysRef.current])
-    if (!listed) listedRef.current = false
-    // An answer asked before a wipe may be the previous account's list.
-    else if (wipeEpoch() === wiped) listedRef.current = true
+    listedRef.current = listed
+    trustedRef.current = listed
+    if (listed) saveQuietList('silenciados', bindingRef.current, keysRef.current)
   }, [commit])
 
   // A failed read keeps what is known: the node filters either way.
@@ -103,6 +133,10 @@ export function MutesProvider ({ children }) {
     if (listedRef.current) reportMutes([...keysRef.current])
   }, [sessionKey, node.epoch])
 
+  useEffect(() => {
+    if (mayStore && listedRef.current && trustedRef.current) saveQuietList('silenciados', bindingRef.current, keysRef.current)
+  }, [mayStore, bindingKey])
+
   const refresh = useCallback(async () => {
     await reload()
     setChanged((n) => n + 1)
@@ -116,7 +150,10 @@ export function MutesProvider ({ children }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
-      reportMutes([...next])
+      // One key over a list never read whole this run would replace the
+      // worker's whole list; the next whole read reports it with this key.
+      if (listedRef.current) reportMutes([...next])
+      if (listedRef.current && trustedRef.current) saveQuietList('silenciados', bindingRef.current, next)
       setChanged((n) => n + 1)
       return r
     } catch (err) {
