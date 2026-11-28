@@ -1659,10 +1659,85 @@ preparar_www() {
       return 1
     fi
   done
+  if ! aplicar_origem_midia "$destino" "$cand_seeder"; then
+    return 1
+  fi
   if ! ler_associacoes "$env_file" || ! gravar_associacoes "$destino" \
     || ! gravar_versao "$destino" "$cand_commit"; then
     return 1
   fi
+}
+
+# A imagem web publicada vale para toda instalação e sai sem origem de mídia:
+# o CSP que o service worker serve com o app guardado (sem rede, numa
+# navegação que falha ou demora) deixaria o CDN de fora, e a mídia voltaria
+# ao servidor. Com VARANDA_MEDIA_ORIGIN, o finish-web.js da imagem do
+# semeador da mesma versão (a assinatura já foi conferida) refaz em $1 o
+# sw.js, o index.html e a cópia do nó, num contêiner sem rede que só vê uma
+# cópia de $1 sem o .well-known: os mesmos bytes de um build com a origem,
+# que também muda a versão. Sem a origem, a mesma conta devolve os bytes da
+# imagem. Um sw.js sem MEDIA_ORIGIN (app anterior ao CDN) ou uma imagem sem
+# o finish-web.js ficam como estão. A troca segue a ordem de mesclar_www:
+# a cópia nova do nó, o sw.js, o index.html e só então a cópia antiga sai.
+aplicar_origem_midia() {
+  local www=$1 imagem=$2 trabalho="$state/www-midia" saida=0 versao f p linha
+  local script=/app/apps/app/scripts/finish-web.js copia_re='^varanda-node-[0-9a-f]{16}\.js$'
+  linha="const MEDIA_ORIGIN = \"$media_origin\""
+  if ! grep -q '^const MEDIA_ORIGIN = ' "$www/sw.js"; then
+    if [ -n "$media_origin" ]; then
+      log "o sw.js de $www não tem MEDIA_ORIGIN (app anterior ao CDN): o app guardado segue sem a origem de mídia"
+    fi
+    return 0
+  fi
+  if grep -qxF "$linha" "$www/sw.js"; then
+    return 0
+  fi
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --entrypoint test "$imagem" -f "$script" 2>/dev/null || saida=$?
+  if [ "$saida" = 1 ]; then
+    log "sem $script em $imagem: o app guardado segue com a origem de mídia da imagem web"
+    return 0
+  fi
+  if [ "$saida" != 0 ]; then
+    log "não foi possível conferir $script em $imagem (saída $saida)"
+    return 1
+  fi
+  # Sem o .well-known, que o build não tem, nem as cópias .midia que uma troca
+  # interrompida tenha deixado: entrariam na versão e no precache.
+  rm -rf "$trabalho"
+  if ! mkdir -m 0755 "$trabalho" || ! cp -R "$www/." "$trabalho/" \
+    || ! rm -rf "$trabalho/.well-known" "$trabalho"/.*.midia; then
+    rm -rf "$trabalho"
+    log "não foi possível copiar $www para $trabalho"
+    return 1
+  fi
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 0:0 \
+    --mount "type=bind,source=$trabalho,target=/web" -e "VARANDA_MEDIA_ORIGIN=$media_origin" \
+    --entrypoint node "$imagem" "$script" /web >/dev/null 2>&1 || saida=$?
+  versao=$(versao_web "$trabalho/index.html")
+  if [ "$saida" != 0 ] || [ -z "$versao" ] || ! grep -qxF "$linha" "$trabalho/sw.js" \
+    || ! conferir_arvore "$trabalho" || [ ! -f "$trabalho/varanda-node-$versao.js" ]; then
+    rm -rf "$trabalho"
+    log "não foi possível gravar a origem de mídia no app web com $imagem (saída $saida)"
+    return 1
+  fi
+  for f in "varanda-node-$versao.js" sw.js index.html; do
+    if [ -L "$www/$f" ] || { [ -e "$www/$f" ] && [ ! -f "$www/$f" ]; } \
+      || ! { cp "$trabalho/$f" "$www/.$f.midia" && chmod 0644 "$www/.$f.midia" && mv -f "$www/.$f.midia" "$www/$f"; }; then
+      rm -f "$www/.$f.midia" 2>/dev/null || true
+      rm -rf "$trabalho"
+      log "não foi possível gravar $f em $www"
+      return 1
+    fi
+  done
+  rm -rf "$trabalho"
+  for p in "$www"/varanda-node-*.js; do
+    f=${p##*/}
+    if [[ $f =~ $copia_re ]] && [ "$f" != "varanda-node-$versao.js" ] && ! rm -f "$p"; then
+      log "aviso: não foi possível apagar $p"
+    fi
+  done
+  log "app web com a origem de mídia ${media_origin:-(nenhuma)}: versão $versao"
 }
 
 # Algum contêiner do projeto veio do compose em $1: ele monta arquivos de
@@ -3039,7 +3114,7 @@ subir_instalada() {
     log 'arquivo de ambiente recusado; nada mudou'
     return 1
   fi
-  if [ "$perfil" = full ] && ! gravar_associacoes "$dir/www"; then
+  if [ "$perfil" = full ] && { ! aplicar_origem_midia "$dir/www" "$r_seeder" || ! gravar_associacoes "$dir/www"; }; then
     descartar_candidato
     return 1
   fi

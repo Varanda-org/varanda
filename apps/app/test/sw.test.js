@@ -1108,6 +1108,35 @@ test('the build reads VARANDA_MEDIA_ORIGIN from the environment and fails with a
   t.is(run(makeDist(), '').code, 0, 'an empty value is no origin')
 })
 
+// deploy/seeder/update.sh (aplicar_origem_midia) runs finishWeb again, with
+// the server's origin, on a copy of the app the web image ships: already
+// finished without an origin, version.json rewritten, no .well-known.
+test('finishing an already finished app with an origin equals a build with it, and without one restores it', (t) => {
+  const origin = 'https://media.example.test'
+  const files = ['sw.js', 'index.html']
+  const read = (dist, version) => files.concat(nodeOf(version).slice(1)).map((f) => fs.readFileSync(path.join(dist, f)))
+
+  const shipped = makeDist()
+  quiet(() => finishWeb(shipped, undefined, { mediaOrigin: '' }))
+  fs.writeFileSync(path.join(shipped, 'version.json'), '{"v":1,"commit":"' + 'a'.repeat(40) + '"}\n')
+  const plain = readWorker(shipped).version
+  const before = read(shipped, plain)
+
+  const built = makeDist()
+  quiet(() => finishWeb(built, undefined, { mediaOrigin: origin }))
+  const withOrigin = readWorker(built).version
+
+  quiet(() => finishWeb(shipped, undefined, { mediaOrigin: origin }))
+  t.is(readWorker(shipped).version, withOrigin, 'the release id of a build with the origin')
+  read(built, withOrigin).forEach((bytes, i) => t.ok(bytes.equals(read(shipped, withOrigin)[i]), 'same bytes: ' + (files[i] || 'node copy')))
+  t.alike(fs.readdirSync(shipped).filter((n) => n.startsWith('varanda-node-')), [nodeOf(withOrigin).slice(1)], 'only the new node copy')
+
+  quiet(() => finishWeb(shipped, undefined, { mediaOrigin: '' }))
+  t.is(readWorker(shipped).version, plain, 'no origin: the shipped release id again')
+  before.forEach((bytes, i) => t.ok(bytes.equals(read(shipped, plain)[i]), 'shipped bytes again: ' + (files[i] || 'node copy')))
+  t.alike(fs.readdirSync(shipped).filter((n) => n.startsWith('varanda-node-')), [nodeOf(plain).slice(1)], 'only the shipped node copy')
+})
+
 test('the offline shell never takes the headers of its cache entry', async (t) => {
   const { w, version } = await installed()
   // Passes headersOk, but loosens everything the check does not cover.

@@ -62,3 +62,22 @@ test('the check refuses what the image leaves out and admits what it ships', (t)
     t.is(r.code, 0, code + ' loads: ' + r.stderr)
   }
 })
+
+// deploy/seeder/update.sh (aplicar_origem_midia) runs the web app finisher
+// from this image to put VARANDA_MEDIA_ORIGIN into the app the web image
+// ships: it and its service worker template ship, and it loads nothing else.
+test('the web app finisher and its template ship, and it loads only Node built-ins', (t) => {
+  const r = inImage(['-e', [
+    "require.resolve('../app/scripts/sw.js')",
+    "require('../app/scripts/finish-web.js')",
+    "const path = require('node:path')",
+    "const root = path.resolve(process.cwd(), '../..')",
+    'console.log(JSON.stringify(Object.keys(require.cache).map((f) => path.relative(root, f))))'
+  ].join('\n')])
+  t.is(r.code, 0, r.stderr)
+  const loaded = JSON.parse(r.stdout || '[]').filter((f) => f !== path.relative(path.resolve(CLI, '../..'), HOOK))
+  t.alike(loaded, ['apps/app/scripts/finish-web.js'], 'only finish-web.js itself (and the check)')
+  const other = inImage(['-e', "require.resolve('../app/scripts/render-og.js')"])
+  t.not(other.code, 0, 'another app script is left out')
+  t.ok(other.stderr.includes('is not in the seeder image'), other.stderr.split('\n')[0])
+})
