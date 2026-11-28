@@ -74,13 +74,43 @@ O hash SHA-256 do índice no manifesto do service worker inclui o link. Uma nova
 Só em desenvolvimento (`__DEV__`) e só com `EXPO_PUBLIC_VARANDA_PERF=1`: as marcas viram linhas `perf: <nome> <ms> [extra]` no console e nunca são enviadas nem guardadas. Todas contam em ms desde `perf: js-entry 0 origin`, a primeira linha de cada execução (`src/perfEntry.js`, importado logo depois do polyfill de cripto em `index.js`).
 
 - Partida, impressas na hora: `sweep-media-cache` e `worklet-start` (duração de cada passo), `app-commit` (primeiro commit do React), `first-rows:<perfId>` (primeira vez que a lista tem linhas), `scroll-start:<perfId>` e `scroll-done:<perfId>` (rolagem roteirizada, abaixo).
-- Do nó, uma vez cada: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>` (duração do pedido), `first-rows`, `details`, `moments`, `splash-end` (com `feedReady` ou `patience`), `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas` ou `:comunidades`), `preview-shown`, `media-hash` e `tab:<id>`.
+- Do nó, uma vez cada: `config`, `sync.status`, `identity.status`, `ready`, `req:<método>` (duração do pedido), `first-rows`, `details`, `moments`, `splash-end` (com `feedReady` ou `patience`), `blocks-ok`, `rows-snapshot` e `rows-live` (com sufixo `:diario`, `:membro`, `:conversas`, `:comunidades` ou `:avisos`; `rows-snapshot:avisos` e `rows-live:avisos` marcam Avisos), `preview-shown`, `media-hash` e `tab:<id>`.
 - Renderização: `perf: render <id> <vezes> <ms somados>` pelo `Profiler` do React (tempo de render, `actualDuration`, não de commit). Ids `tab:<rua|espiadinha|busca|avisos|comunidades|feira|diario>` para cada aba montada e `list:<perfId>` para cada lista. Fora da rolagem roteirizada sai no máximo a cada 5 s; durante ela nada é impresso até o fim, e as linhas levam ` phase=scroll:<perfId>`.
 - Quadros: `perf: frames n= p50= p95= max= over32= list=<perfId> run=scroll rows= mounts= unmounts= rendersPerMountMedian= rendersPerMountP95=`, impressa em `scroll-done`. Com rolagem à mão, a linha sai sem `run=scroll` depois de cada pausa.
 - O contador de linhas (`rows`, `mounts`, `rendersPerMount*`) é mantido por lista (`list=<perfId>`): cada linha `frames` conta só as linhas da própria lista. O custo das abas escondidas que renderizam durante a rolagem aparece nas linhas `render`, não aqui. Não compare as contagens de linhas `frames` de rolagem à mão com as da `run=scroll`.
 - Nós: as marcas do nó (`splash-end` inclusive) só saem quando `details` assenta ou numa troca de aba (`apps/app/App.js`, perto das linhas 3014 a 3026); na Vitrine, `details` não assenta, então elas só saem depois de um toque numa aba. A rolagem roteirizada começa (6,2 a 7,0 s) antes de a cobertura do splash sair (cerca de 7,7 s depois de `js-entry`).
 
 Resumo de um registro salvo (logcat ou console do Metro): `node apps/app/scripts/perf-summary.js <registro>` dá execuções, marcas, renderizações por execução e quadros (n, mediana, p95, dispersão). Conta uma amostra por lista e por execução: uma linha `run=scroll` vale pela execução; sem ela, as linhas de rolagem à mão da execução são combinadas (p50 e p95 ponderados por n, aproximados). O script só aceita fichas feitas dos caracteres que a harness imprime (letras, dígitos, `: . _ / = -`) e pula qualquer outra linha, então caracteres de controle de um registro nunca chegam ao terminal. O script conta qualquer linha com `perf: `, de qualquer processo: salve o logcat filtrado pelo processo do app (`adb logcat --pid=$(adb shell pidof -s app.varanda.debug)`), porque um filtro de tag sozinho não impede que outro app do aparelho escreva linhas que mudem os números.
+
+### Reabertura
+
+Mede a reabertura de cada tela a partir da cópia salva no aparelho.
+O bloco Reabertura do resumo dá, por tela, a mediana e o p95 de `ready` até
+`rows-snapshot`, de `blocks-ok` até `rows-snapshot` e de `rows-snapshot` até
+`rows-live`. `sem cache` conta as execuções em que `rows-live` apareceu sem
+`rows-snapshot`.
+
+- Montagem: Metro com `EXPO_PUBLIC_VARANDA_PERF=1`.
+  `node apps/cli/scripts/hosted-lab.js --port 8123 --dataset 1 --dataset-size 60x150`,
+  apontado para o Metro com `--expo`. Autenticador virtual, como em
+  "Laboratório com dados". CPU 4x mais lenta.
+- Execução: abrir cada tela (A Rua, Espiadinha, Diário Publicações e Mural,
+  Avisos, Conversas), esperar 10 s, recarregar duas vezes, depois recarregar
+  uma vez sem rede. As marcas de desenvolvimento só saem numa troca de aba ou
+  quando `feedBoot.details` assenta: antes de cada recarga, troque de aba uma
+  vez ou leia `globalThis.__varandaDev.report()` no console, senão as marcas
+  dessa execução se perdem. Salvar o console e rodar
+  `node apps/app/scripts/perf-summary.js <registro>`. Ler o bloco Reabertura.
+- Repro da aba vazia: um diário com 31 curtidas depois da última publicação
+  (a primeira página de 30 entradas não tem publicação).
+- Como contar, no quadro da cópia salva, em `blocks-ok` e depois do vivo:
+  linhas esqueleto, marcas "…" em "Respondendo a …", e imagens que faltam.
+- Vitrine no emulador Android e no simulador iOS: só layout, ela não inicia
+  o worklet.
+- No aparelho do dono (lista do que só o aparelho confirma): o tempo até as listas
+  de bloqueio (linha `listas <n> ms` do registro de sincronização, sempre
+  impressa), a linha `abertura` (só aparece acima de 1 s), a linha
+  `cópias locais apagadas ao abrir`, e se a tela pintou da cópia salva na segunda abertura.
 
 ### Lista nativa sem conta (Vitrine)
 

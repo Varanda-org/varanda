@@ -39,8 +39,10 @@ export function buildInfo ({ kind, commit, builtAt, release } = {}) {
   }
 }
 
-// -> { name, build } with each field null unless it passes its pattern.
-export function storeInfo ({ name, build } = {}) {
+// -> { name, build } with each field null unless it passes its pattern. The web
+// passes null (no store binary), which a destructuring default does not cover.
+export function storeInfo (info) {
+  const { name, build } = info || {}
   const b = typeof build === 'number' && Number.isInteger(build) ? String(build) : build
   return {
     name: matches(STORE_NAME_RE, name) ? name : null,

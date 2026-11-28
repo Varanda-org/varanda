@@ -15,9 +15,9 @@ import { planRowPeeks, runRowPeeks } from './rowPeek'
 
 export function useRowPeeks (keys, enabled, window) {
   const node = useNode()
-  const { profileOf, isPeeked, learnVerified, forgetVerified, peekScope } = useNames()
+  const { profileOf, isPeeked, isSavedPeek, learnVerified, forgetVerified, peekScope } = useNames()
   const latest = useRef({})
-  latest.current = { keys, window, profileOf, isPeeked, learnVerified, forgetVerified, request: node.request, peekScope }
+  latest.current = { keys, window, profileOf, isPeeked, isSavedPeek, learnVerified, forgetVerified, request: node.request, peekScope }
   const tried = useRef(new Set())
   const run = useRef(0)
   const active = useRef(null)
@@ -35,7 +35,7 @@ export function useRowPeeks (keys, enabled, window) {
     const current = () => run.current === id && latest.current.peekScope === scope
     active.current = { run: id, scope }
     runRowPeeks({
-      plan: () => planRowPeeks({ peers: latest.current.keys, profileOf: latest.current.profileOf, isPeeked: latest.current.isPeeked, tried: tried.current, scope, window: latest.current.window }),
+      plan: () => planRowPeeks({ peers: latest.current.keys, profileOf: latest.current.profileOf, isPeeked: latest.current.isPeeked, isSaved: latest.current.isSavedPeek, tried: tried.current, scope, window: latest.current.window }),
       tried: tried.current,
       scope,
       lookupMany: fetchMembers,

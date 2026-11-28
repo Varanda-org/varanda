@@ -335,6 +335,16 @@ test('a person row draws the @nome line from the names cache only', (t) => {
   t.ok(row.includes('{handle ? <Text style={styles.handle} numberOfLines={1}>'), 'one line, cut like the title')
 })
 
+test('a row keeps its picture for the reopened copy and its person title from the names cache only', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  const avatar = row.slice(row.indexOf('<Avatar '), row.indexOf('/>', row.indexOf('<Avatar ')))
+  t.ok(avatar.includes("persist='copy'"), 'people and groups alike')
+  t.absent(avatar.includes('persist={false}'))
+  t.ok(row.includes('const cached = person && names ? names.profileOf(key) : undefined'))
+  t.ok(row.includes('? { name: cached ? cached.name : null, username: cached ? cached.username : null }'), 'a person title never reads name fields off the row')
+  t.absent(/item\.(username|avatar)/.test(row), 'nor its @nome or picture')
+})
+
 test('oldKeyRow is a pinned old-key row that only Todas shows', async (t) => {
   const { oldKeyRow, requestsRow, applyFilter } = await load()
   const K1 = '11'.repeat(32)
@@ -365,4 +375,27 @@ test('Conversas pins Pedidos, walks Não lidas and reports group unread', (t) =>
   const report = src.slice(src.lastIndexOf('useEffect(() => {', reportAt), reportAt)
   t.ok(report.includes('if (pageKey !== null) return'), 'the screen never calls onGroupsUnread when pageKey is not null')
   t.ok(report.includes('groups.loaded && !groups.loading && !groups.failed && !groups.error'), 'only a finished live read without failures may clear the dot')
+})
+
+test('a private group row passes the stored picture pair while seeded and its own once live', async (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  const start = row.indexOf('const HEX64 = ')
+  const code = row.slice(start, row.indexOf('\n}', row.indexOf('function groupThumbProps')) + 2).replace('export function', 'function')
+  // eslint-disable-next-line no-new-func
+  const groupThumbProps = new Function(code + '\nreturn groupThumbProps')()
+  const { pictureProps } = await import('../src/groupImage.js')
+  const author = 'ef'.repeat(32)
+  const sha = '9b'.repeat(32)
+  const image = { core: '99'.repeat(32), mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: '78'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), plainMime: 'image/jpeg', plainSha256: sha, w: 512, h: 512, ms: 0 }
+  const props = (item) => groupThumbProps(item, pictureProps(item))
+  const seeded = { kind: 'group', key: '11'.repeat(32), name: 'G', thumb: '22'.repeat(32), thumbAuthor: author }
+  t.alike(props(seeded), { groupThumb: { author, sha: '22'.repeat(32) }, keepGroupThumb: false }, 'a seeded row: the stored pair, nothing kept')
+  t.alike(props({ ...seeded, thumb: undefined, thumbAuthor: undefined, visibility: 'private', image, imageAuthor: author }), { groupThumb: { author, sha }, keepGroupThumb: true }, 'a live row: its own pair, kept')
+  t.alike(props({ ...seeded, visibility: 'private', image, imageAuthor: author }), { groupThumb: { author, sha }, keepGroupThumb: true }, 'the live picture wins over a stored pair')
+  t.alike(props({ kind: 'group', key: '11'.repeat(32), name: 'G', visibility: 'private', image: null, imageAuthor: null }), { groupThumb: null, keepGroupThumb: false }, 'a live row without a picture: none')
+  t.alike(props({ ...seeded, image: null }), { groupThumb: null, keepGroupThumb: false }, 'a pair beside an image field is never drawn')
+  t.alike(props({ ...seeded, thumbAuthor: author.toUpperCase() }), { groupThumb: null, keepGroupThumb: false }, 'an invalid pair: none')
+  const publicImage = { core: '99'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 20000, sha256: '78'.repeat(32), width: 512, height: 512 }
+  t.alike(props({ kind: 'group', key: '11'.repeat(32), visibility: 'public', image: publicImage, imageAuthor: author }), { groupThumb: null, keepGroupThumb: false }, 'a public picture: none')
+  t.ok(row.includes("{...(person ? { picture: avatar } : { ...pictured, ...thumbProps })} persist='copy'"), 'the Avatar gets the props, people none')
 })

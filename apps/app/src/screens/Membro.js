@@ -27,7 +27,7 @@
 // way to follow K2. The node also follows K2 by itself, once, after it
 // verified the move (Terms 15). K1's posts past the move are not shown.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
@@ -97,7 +97,7 @@ import { useMoments, useMomentSeen } from './Momentos'
 import { ABOUT_LABEL, MEMBER_SHORTCUTS, aboutEntry, aboutHint, avatarMoments, shortcutList } from '../profileSlim.js'
 import { AboutLink, AboutSheet } from '../ui/ProfileAbout'
 import { ProfileShortcuts } from '../ui/ProfileShortcuts'
-import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
+import { buildScreenSnapshot, screenKeepOnlyAuthors, screenWithoutAuthors } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { cacheGeneration } from '../localCaches'
@@ -419,9 +419,18 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     setPosts(postsRef.current)
   }, [])
 
-  // ref -> post item of the seeded reposts' originals, while those rows
-  // are still on screen (seeded, or kept unverified after the live page).
+  // ref -> post item of the seeded reposts' and quotes' originals, while
+  // those rows are still on screen (seeded, or kept unverified after the
+  // live page).
   const seedOriginalsRef = useRef(null)
+  // The stored names of the seeded rows' other authors, as names.seedMany
+  // pairs. Seeded before the paint, so those rows show name and photo at
+  // once; only for authors the cache does not know.
+  const [seedNames, setSeedNames] = useState(null)
+  const seedMany = names.seedMany
+  useLayoutEffect(() => {
+    if (seedNames !== null && seedNames.length > 0) seedMany(seedNames)
+  }, [seedNames, seedMany])
   // The live first page, whole, so the pill can show it. The list keeps
   // cached rows until that tap, so this is not what is on screen. `before`
   // is kept with it: a later page must not stay the cursor once the list
@@ -456,10 +465,12 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     seedBindingRef.current = binding
     if (!headerRef.current.verified) commitHeader({ ...entry.header, verified: false })
     if (!at.full || postsRef.current.phase !== 'loading') return
-    // A quote card reads the peeks only: those rows wait for the live page.
-    const items = entry.items.filter((i) => i.quote === null && (i.kind !== 'repost' || !at.blockedKeys.has(i.to.author)))
+    // A block made since the save hides the rows and originals it reaches.
+    const blockedRef = (target) => target !== null && typeof target === 'object' && at.blockedKeys.has(target.author)
+    const items = entry.items.filter((i) => !blockedRef(i.kind === 'repost' ? i.to : i.quote))
     if (items.length === 0) return
-    seedOriginalsRef.current = new Map(Object.entries(entry.originals))
+    seedOriginalsRef.current = new Map(Object.entries(entry.originals).filter(([, o]) => !at.blockedKeys.has(o.author)))
+    setSeedNames(entry.names.filter((n) => !at.blockedKeys.has(n.author)).map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }]))
     commit({ ...INITIAL_POSTS, phase: 'ready', items, before: entry.before, atEnd: entry.atEnd, seeded: true })
     perfMarks().mark('rows-snapshot:membro')
   }, [author, ownKey, commit, commitHeader])
@@ -490,6 +501,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         before: page.before,
         atEnd: page.atEnd,
         originals: page.originals,
+        names: at.profileOf,
         followed: at.follows,
         blocked: at.blockedKeys
       })
@@ -498,8 +510,11 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   }, [author, ownKey])
 
   // An unfollow or a block here removes the author's entry at once. Acting
-  // as a page the member's snapshot cannot be read, so it all goes.
-  const dropSnapshotEntry = useCallback(() => {
+  // as a page the member's snapshot cannot be read, so it all goes. Only a
+  // block (`block`) also takes the author out of the other kept pages: after
+  // an unfollow they stay there as a repost or quote original and a name, as
+  // on a follow-list change.
+  const dropSnapshotEntry = useCallback((block) => {
     clearTimeout(saveTimerRef.current)
     saveTimerRef.current = null
     const at = snapRef.current
@@ -512,7 +527,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     }
     const snapshot = loadScreenSnapshot('membro', { ...binding, acting })
     if (snapshot === null || !Object.prototype.hasOwnProperty.call(snapshot.body.authors, author)) return
-    const next = screenWithoutAuthors(snapshot, [author])
+    const next = block === true
+      ? screenWithoutAuthors(snapshot, [author])
+      : screenKeepOnlyAuthors(snapshot, Object.keys(snapshot.body.authors).filter((a) => a !== author))
     if (next === null || Object.keys(next.body.authors).length === 0 || !saveScreenSnapshot('membro', next, cacheGeneration())) clearScreenSnapshot('membro')
   }, [author, ownKey])
   useEffect(() => () => clearTimeout(saveTimerRef.current), [])
@@ -928,7 +945,8 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     page: isPage || (seed !== null && seed.page === true) || idxHint !== null || pageRead !== null || (namedPage !== null && typeof namedPage === 'object' && namedPage.page === true),
     config: node.config,
     passkey: node.passkey,
-    blockLoad: blocks.loadState
+    blockLoad: blocks.loadState,
+    profileOf: names.profileOf
   }
   // A seed held for block.list runs once it answers (seedSnapshot checks the
   // load is still the same and nothing live came first).
@@ -948,7 +966,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     if (postsRef.current.seeded) commit({ ...INITIAL_POSTS })
   }, [node.config, ownKey, commit, commitHeader])
   useEffect(() => {
-    if (blockedHere) dropSnapshotEntry()
+    if (blockedHere) dropSnapshotEntry(true)
   }, [blockedHere, dropSnapshotEntry])
   const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
   useEffect(() => {
@@ -1031,7 +1049,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     try {
       await request(on ? 'follow.add' : 'follow.remove', { key: author })
       mark(author, on)
-      if (!on) dropSnapshotEntry()
+      if (!on) dropSnapshotEntry(false)
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
@@ -1611,7 +1629,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const fromSeed = seeded || (Array.isArray(unverified) && unverified.includes(String(item.seq)))
     const post = shownPost(item, peeked, fromSeed ? seedOriginalsRef.current : null)
     if (post === null) return null
-    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} level={post.replyTo ? 'comment' : 'post'} />
+    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item), originals: fromSeed ? seedOriginalsRef.current : null, strangerPersist: 'copy' })} level={post.replyTo ? 'comment' : 'post'} />
   }
   renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost
 

@@ -17,14 +17,15 @@
 // generation: an answer older than a newer read is dropped. Acting as a page,
 // the inbox is the page's (useDmRequest) and its groups stay in Comunidades.
 // The member's stored 'conversas' inbox paints after the block list answers,
-// then the live first page replaces it in place. Group rows come from
+// with the names its rows showed (seeds a profile answer replaces), then the
+// live first page replaces it in place. Group rows come from
 // 'conversasGrupos', with private names from 'conversas'. Only live default
 // pages are stored, bound to the identity and generation before their read.
 // Props: { active, onOpenGroup, onOpenCommunity, onOpenThread,
 // onOpenCommunities, onOpenRequests, showInbox, seenTick, composing,
 // onComposing, onGroupsUnread }.
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
@@ -33,6 +34,7 @@ import { cachedRowsShown } from '../cachedRows'
 import { buildScreenSnapshot } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { keepGroups } from '../privateSnapshot'
+import { retainGroupThumbs } from '../media/keep'
 import { useNames } from '../names'
 import { fetchMembers } from '../indexClient'
 import { diaryPeekSlots } from '../engagement'
@@ -106,6 +108,11 @@ const NO_GROUPS = { rows: [], loaded: false, loading: false, partial: false, err
 // separately bound private snapshot.
 function seedRow (r, binding) {
   const row = { group: r.group, community: r.community, role: r.role, general: r.general, seeded: true, seedBinding: binding }
+  // Only a public group's picture is stored; a private one waits for the live read.
+  if (r.image !== undefined && r.imageAuthor !== undefined) {
+    row.image = r.image
+    row.imageAuthor = r.imageAuthor
+  }
   if (r.name !== null) {
     if (r.general) row.title = r.name
     else row.name = r.name
@@ -127,6 +134,76 @@ function seededGroups (binding, privateGroups = []) {
     else row.name = name
   }
   return { ...NO_GROUPS, rows: seeded, seeded: true }
+}
+
+const sameAvatar = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+
+// The names the stored Conversas copy keeps for `rows` (privateSnapshot.js):
+// one { peer, name, username, avatar, peeked, verifiedAt } per unblocked row
+// the names cache names. `peeked`: a node-verified peek, of this run or saved
+// and still owed again (isSavedPeek). A name this run verified is dated `now`;
+// one still showing what the stored copy (`stored`) seeded keeps that date,
+// so a copy never outlives 14 days from the last real check. A saved peek
+// without a stored date is left out.
+export function namesToSave (rows, { profileOf, isPeeked, isSavedPeek, blocked, stored, now }) {
+  const before = new Map((Array.isArray(stored) ? stored : []).map((n) => [n.peer, n]))
+  const out = []
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const peer = row && row.peer
+    if (typeof peer !== 'string' || (blocked && blocked.has(peer))) continue
+    const p = profileOf(peer)
+    if (!p || (!p.name && !p.username && !p.avatar)) continue
+    const saved = isSavedPeek(peer)
+    const entry = { peer, name: p.name || null, username: p.username || null, avatar: p.avatar || null, peeked: isPeeked(peer) || saved }
+    const old = before.get(peer)
+    const unchanged = old !== undefined && old.name === entry.name && old.username === entry.username && sameAvatar(old.avatar, entry.avatar)
+    if (saved || (!isPeeked(peer) && unchanged)) {
+      if (old !== undefined) out.push({ ...entry, verifiedAt: old.verifiedAt })
+      continue
+    }
+    out.push({ ...entry, verifiedAt: now })
+  }
+  return out
+}
+
+// The stored names as seeds: [peer, { name, username, avatar? }] pairs, the
+// peeked ones for names.seedPeeked and the rest for names.seedMany. No
+// blocked peer; an unknown picture stays unknown.
+export function storedNameSeeds (names, blocked) {
+  const peeked = []
+  const plain = []
+  for (const n of Array.isArray(names) ? names : []) {
+    if (!n || typeof n.peer !== 'string' || (blocked && blocked.has(n.peer))) continue
+    const seed = { name: n.name, username: n.username }
+    if (n.avatar) seed.avatar = n.avatar
+    ;(n.peeked === true ? peeked : plain).push([n.peer, seed])
+  }
+  return { peeked, plain }
+}
+
+// The picture pairs ([{ author, sha }]) of the private groups a saved
+// Conversas copy keeps: the only group pictures the kept store may hold.
+export function groupThumbPairs (groups) {
+  const out = []
+  for (const g of Array.isArray(groups) ? groups : []) {
+    if (g && typeof g.thumb === 'string' && typeof g.thumbAuthor === 'string') out.push({ author: g.thumbAuthor, sha: g.thumb })
+  }
+  return out
+}
+
+// group -> { thumb, thumbAuthor } for each row still seeded from the copy of
+// `binding`, from the stored private groups. A live row gets none, with or
+// without a picture.
+export function seededGroupThumbs (rows, stored, binding) {
+  const pairs = new Map()
+  for (const g of Array.isArray(stored) ? stored : []) {
+    if (g && typeof g.thumb === 'string' && typeof g.thumbAuthor === 'string') pairs.set(g.group, { thumb: g.thumb, thumbAuthor: g.thumbAuthor })
+  }
+  const out = new Map()
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r && r.seeded === true && r.image === undefined && pairs.has(r.group) && sameSnapshotBinding(r.seedBinding, binding)) out.set(r.group, pairs.get(r.group))
+  }
+  return out
 }
 
 // `rows` without the stored rows read for another binding: another
@@ -175,6 +252,10 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding, privateG
   const requestRef = useRef(request)
   requestRef.current = request
   const liveMarked = useRef(false)
+  // Read at save time: the load callback outlives the render it was made in.
+  const blocks = useBlocks()
+  const blockedRef = useRef(blocks.keys)
+  blockedRef.current = blocks.keys
 
   const load = useCallback(async () => {
     const mine = ++gen.current
@@ -250,7 +331,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding, privateG
       forgetLeftGroups(snapshotBinding, all.map((r) => r.group), cacheGen)
       if (typeof onCompleteRef.current === 'function') onCompleteRef.current()
     }
-    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)
+    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', { ...snapshotBinding, blocked: blockedRef.current }, rowsForStorage(all), cacheGen)
   }, [])
 
   useEffect(() => {
@@ -579,6 +660,7 @@ export function Conversas ({
   const [snapshotSeed, setSnapshotSeed] = useState(readSeed)
   if (snapshotSeed.key !== snapshotKey) setSnapshotSeed(readSeed())
   const seedBody = sameSnapshotBinding(snapshotSeed.binding, snapshotBinding) && snapshotSeed.snapshot !== null ? snapshotSeed.snapshot.body : null
+  const names = useNames()
   // The last live inbox page armed for saving: a complete group read that
   // lands after its write saves it again with the group names.
   const lastInbox = useRef(null)
@@ -590,8 +672,10 @@ export function Conversas ({
   const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, privateGroups: seedBody === null ? [] : seedBody.groups, onComplete: onGroupsComplete, binding: snapshotBinding })
   const blocks = useBlocks()
   const saveContext = useRef(null)
-  saveContext.current = { node, acting, pageKey, blocks, completeRows: groups.completeRows, storedGroups: seedBody === null ? [] : seedBody.groups }
+  saveContext.current = { node, acting, pageKey, blocks, names, completeRows: groups.completeRows, storedGroups: seedBody === null ? [] : seedBody.groups, storedNames: seedBody === null ? [] : seedBody.names }
   const saveTimer = useRef(null)
+  // The row names the last save read: one settling later saves again.
+  const savedViews = useRef(null)
   const cancelSave = useCallback(() => {
     clearTimeout(saveTimer.current)
     saveTimer.current = null
@@ -602,25 +686,50 @@ export function Conversas ({
     cancelSave()
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null
-      const { node, acting, pageKey, blocks, completeRows, storedGroups } = saveContext.current
+      const { node, acting, pageKey, blocks, names, completeRows, storedGroups, storedNames } = saveContext.current
       const now = memberSnapshotBinding({ node, acting, pageKey })
       if (cacheGeneration() !== gen || !sameSnapshotBinding(binding, now) || blocks.loadState !== 'ok') return
       const complete = completeRows.current
       // Before a complete group read the stored names stay: an empty list
       // would erase them. storedGroups is the copy read for this binding.
-      const groups = complete !== null && sameSnapshotBinding(complete.binding, now)
+      const fromComplete = complete !== null && sameSnapshotBinding(complete.binding, now)
+      const groups = fromComplete
         ? complete.rows
         : storedGroups.map((g) => ({ ...g, visibility: 'private' }))
+      const kept = rows.slice(0, 30).filter((r) => !blocks.keys.has(r.peer))
+      const at = Date.now()
+      savedViews.current = { rows, views: kept.map((r) => names.profileOf(r.peer)) }
       const snapshot = buildScreenSnapshot('conversas', {
         ...binding,
-        rows: rows.slice(0, 30).filter((r) => !blocks.keys.has(r.peer)),
+        now: at,
+        rows: kept,
         groups,
+        names: namesToSave(kept, { profileOf: names.profileOf, isPeeked: names.isPeeked, isSavedPeek: names.isSavedPeek, blocked: blocks.keys, stored: storedNames, now: at }),
         blocked: blocks.keys
       })
-      if (snapshot !== null) saveScreenSnapshot('conversas', snapshot, gen)
+      // Only what was just saved names the group pictures kept: a group left,
+      // or one whose picture changed, loses the old one. A save from the
+      // stored groups prunes nothing: a live row may have kept a picture they
+      // do not name yet, and this run would not keep it again.
+      if (snapshot !== null && saveScreenSnapshot('conversas', snapshot, gen) === true && fromComplete) {
+        const pruned = retainGroupThumbs(groupThumbPairs(snapshot.body.groups))
+        if (pruned && typeof pruned.catch === 'function') pruned.catch(() => {})
+      }
     }, 2000)
   }, [cancelSave])
   armRef.current = armSave
+  // A row name that settles after the last save (profile.read or a peek
+  // answering late) arms it again; a pending save reads the newest names
+  // anyway. profileOf hands out the same view while a name stays the same.
+  const profileOf = names.profileOf
+  useEffect(() => {
+    const last = lastInbox.current
+    const saved = savedViews.current
+    if (last === null || saved === null || saved.rows !== last.rows || saveTimer.current !== null) return
+    const kept = last.rows.slice(0, 30).filter((r) => !saveContext.current.blocks.keys.has(r.peer))
+    if (kept.length === saved.views.length && kept.every((r, i) => profileOf(r.peer) === saved.views[i])) return
+    armRef.current(last.gen, last.binding, last.rows)
+  }, [profileOf])
   // Search text reaches the inbox only while the tab is on screen: leaving it ends the paging.
   const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey, needle: active ? query.trim().toLocaleLowerCase('pt-BR') : '', seed: seedBody === null ? null : seedBody.rows, snapshotBinding, armSave, cancelSave })
   const inboxRows = useMemo(() => {
@@ -728,8 +837,18 @@ export function Conversas ({
     setQuery('')
   }, [showInbox])
 
-  const names = useNames()
-  const { resolveMany, profileOf, learnVerified, forgetVerified, isPeeked, peekScope } = names
+  const { resolveMany, learnVerified, forgetVerified, isPeeked, isSavedPeek, seedMany, seedPeeked, peekScope } = names
+  // The stored copy names its rows before profile.read answers, once per
+  // copy and after the block list: seeds fill only keys the cache does not
+  // hold, so they never override a profile answer.
+  const namesSeeded = useRef(null)
+  useLayoutEffect(() => {
+    if (seedBody === null || namesSeeded.current === snapshotSeed.key || blocks.loadState !== 'ok') return
+    namesSeeded.current = snapshotSeed.key
+    const { peeked, plain } = storedNameSeeds(seedBody.names, blocks.keys)
+    if (peeked.length > 0) seedPeeked(peeked, snapshotSeed.binding.owner)
+    if (plain.length > 0) seedMany(plain)
+  }, [seedBody, snapshotSeed.key, blocks.loadState, blocks.keys, seedPeeked, seedMany])
   const peers = useMemo(() => inboxRows.map((r) => r.peer), [inboxRows])
   useEffect(() => {
     if (peers.length > 0) resolveMany(peers)
@@ -842,7 +961,7 @@ export function Conversas ({
   // the core node refuses the peek and the row keeps "Pessoa".
   const rowPeers = useMemo(() => data.filter((row) => row.kind === 'dm').map((row) => row.peer), [data])
   const peekLatest = useRef({})
-  peekLatest.current = { rowPeers, profileOf, isPeeked, learnVerified, forgetVerified, request: node.request, peekScope }
+  peekLatest.current = { rowPeers, profileOf, isPeeked, isSavedPeek, learnVerified, forgetVerified, request: node.request, peekScope }
   const peekTried = useRef(new Set())
   const peekRun = useRef(0)
   const peekActive = useRef(null)
@@ -860,7 +979,7 @@ export function Conversas ({
     const current = () => peekRun.current === run && peekLatest.current.peekScope === scope
     peekActive.current = { run, scope }
     runRowPeeks({
-      plan: () => planRowPeeks({ peers: peekLatest.current.rowPeers, profileOf: peekLatest.current.profileOf, isPeeked: peekLatest.current.isPeeked, tried: peekTried.current, scope }),
+      plan: () => planRowPeeks({ peers: peekLatest.current.rowPeers, profileOf: peekLatest.current.profileOf, isPeeked: peekLatest.current.isPeeked, isSaved: peekLatest.current.isSavedPeek, tried: peekTried.current, scope }),
       tried: peekTried.current,
       scope,
       lookupMany: fetchMembers,
@@ -1054,6 +1173,7 @@ export function Conversas ({
     else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
   }
 
+  const seededThumbs = seededGroupThumbs(groups.rows, seedBody === null ? [] : seedBody.groups, snapshotBinding)
   const renderItem = ({ item }) => {
     if (item.kind === 'dm') {
       return (
@@ -1066,7 +1186,7 @@ export function Conversas ({
     }
     return (
       <ConversationRow
-        item={{ kind: 'group', key: item.group, name: item.title, visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread }}
+        item={{ kind: 'group', key: item.group, name: item.title, visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread, ...seededThumbs.get(item.group) }}
         now={now}
         onPress={() => onOpenGroup(item.group)}
       />

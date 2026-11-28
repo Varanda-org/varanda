@@ -18,7 +18,21 @@
 // verified photo also goes to the kept store (../media/keptLoad.js) and the
 // next start draws it from there with no fetch. persist 'peek' (a stranger
 // the Espiadinha shows) is fetched as with false; only the bounded peek
-// kinds of the kept store may hold it.
+// kinds of the kept store may hold it. persist 'copy' (a reopened screen's
+// saved copy) is fetched as with true for a followed author and as with
+// false for anyone else (../media/keptLoad.js fetchPersist). On the web
+// every photo is fetched no-store, whatever persist says: the kept store
+// there is IndexedDB, and the browser HTTP cache is never used to keep one
+// (../media/keep.web.js).
+//
+// A private group picture (privateItem) is opened only by the node. Two props,
+// both off by default, let a reopened screen draw it before the node answers:
+// groupThumb { author, sha } (the image author and plainSha256) draws the
+// decrypted copy kept under that pair until the live picture resolves, and
+// only while no live picture with another plainSha256 is given; with
+// keepGroupThumb the decrypted picture is kept under (mediaAuthor,
+// plainSha256) once its SHA-256 matches. Only the plaintext is kept: the key,
+// nonce and core never reach the store.
 
 import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -33,9 +47,11 @@ import { revokeUrl, urlFromBytes } from '../media/display'
 import * as display from '../media/display'
 import { chatMediaKey, onChatMediaReturn, pinChatMedia, sourceFor } from '../media/chatMedia'
 import * as keptStore from '../media/keep'
-import { loadKept, registerKeptStore } from '../media/keptLoad'
-import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
+import { fetchPersist, loadKept, persistMode, registerKeptStore } from '../media/keptLoad'
+import { readReportAudio as readLocalBytes } from '../media/reportAudio'
+import { bumpCacheGeneration, cacheGeneration, copyReadAllowed, groupThumbKeepAllowed, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
+import { useBlocks } from '../blocksProvider'
 import { Icon } from './Icon'
 import { KeptOnlyContext, keptOnlyUrl, mediaHashDeps } from './MediaView'
 import { stripes } from './theme'
@@ -154,9 +170,9 @@ function useAvatarUrl (publicKey, picture, persist) {
       keptUrl: refresh ? noKept : keptStore.keptUrl,
       keptBytes: refresh ? undefined : keptStore.keptBytes,
       keep: refresh ? replaceKept : keptStore.keep,
-      // A stranger's photo ('peek') never goes to the unmanaged HTTP cache:
-      // only the bounded peek kinds may keep it.
-      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist: persist === 'peek' ? false : persist, fresh, fetch: mediaFetch() }),
+      // A stranger's photo ('peek', or 'copy' not followed) never goes to the
+      // unmanaged HTTP cache: only the bounded kinds may keep it.
+      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist: fetchPersist(persist, publicKey), fresh, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
@@ -202,6 +218,167 @@ function useAvatarUrl (publicKey, picture, persist) {
   return { url: key !== null && result.key === key && isShownUrl(result.url) ? result.url : null, key, reload: key !== null ? reload : null }
 }
 
+const HEX64 = /^[0-9a-f]{64}$/
+// The copy store's cap. A kept picture is only what the live draw accepts
+// (usePrivateAvatarUrl): a 512x512 JPEG.
+export const GROUP_THUMB_MAX_BYTES = 262144
+const GROUP_THUMB_MIME = 'image/jpeg'
+const GROUP_THUMB_SIDE = 512
+
+const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+
+function wipe (bytes) {
+  try { if (bytes instanceof Uint8Array) bytes.fill(0) } catch {}
+}
+
+// The pairs kept in this run, so a list does not hash and write the same
+// picture once per row. A purge (new cache generation) forgets them.
+const thumbsKept = new Set()
+const THUMBS_KEPT_MAX = 256
+let thumbsGeneration = null
+
+function thumbKeptBefore (pair, generation) {
+  if (thumbsGeneration !== generation) {
+    thumbsKept.clear()
+    thumbsGeneration = generation
+  }
+  return thumbsKept.has(pair)
+}
+
+// Keeps the decrypted picture of a private group image under (author, sha),
+// the image author and its plainSha256. The store trusts its caller, so the
+// checks are here: an author the block list allows, a JPEG measured at
+// 512x512 (w, h), at most GROUP_THUMB_MAX_BYTES and a SHA-256 equal to sha.
+// Bytes not handed to the store are wiped.
+// deps: { allowed(author), keep(author, sha, bytes, mime), subtle, generation() }.
+// -> Promise<boolean>, true when the store got the bytes. Never rejects.
+export async function keepGroupThumbBytes ({ author, sha, bytes, mime, w, h }, deps) {
+  let handed = false
+  try {
+    if (typeof author !== 'string' || !HEX64.test(author) || typeof sha !== 'string' || !HEX64.test(sha)) return false
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > GROUP_THUMB_MAX_BYTES) return false
+    if (mime !== GROUP_THUMB_MIME || w !== GROUP_THUMB_SIDE || h !== GROUP_THUMB_SIDE) return false
+    if (deps.allowed(author) !== true) return false
+    const subtle = deps.subtle
+    if (!subtle || typeof subtle.digest !== 'function') return false
+    const requested = deps.generation()
+    const hex = toHex(new Uint8Array(await subtle.digest('SHA-256', bytes)))
+    if (hex !== sha) return false
+    // A block or a purge while the hash ran wins.
+    if (deps.generation() !== requested || deps.allowed(author) !== true) return false
+    handed = true
+    deps.keep(author, sha, bytes, mime)
+    return true
+  } catch {
+    return false
+  } finally {
+    if (!handed) wipe(bytes)
+  }
+}
+
+const thumbSubtle = () => mediaHashDeps().subtle || (typeof crypto !== 'undefined' && crypto.subtle) || null
+
+// -> { keep, check }: the keeper chatMedia's sourceFor offers the plaintext
+// to, and the test it runs before reading a picture back on a hit (no read
+// for a picture keep would refuse); or null when this picture needs none.
+function groupThumbKeeper (author, sha) {
+  if (typeof author !== 'string' || !HEX64.test(author) || typeof sha !== 'string' || !HEX64.test(sha)) return null
+  const pair = author + '-' + sha
+  if (thumbKeptBefore(pair, cacheGeneration())) return null
+  const check = (mime, w, h) => mime === GROUP_THUMB_MIME && w === GROUP_THUMB_SIDE && h === GROUP_THUMB_SIDE &&
+    groupThumbKeepAllowed(author) === true && !thumbKeptBefore(pair, cacheGeneration())
+  const keep = (bytes, mime, w, h) => {
+    keepGroupThumbBytes({ author, sha, bytes, mime, w, h }, {
+      allowed: groupThumbKeepAllowed,
+      keep: keptStore.keepGroupThumb,
+      subtle: thumbSubtle(),
+      generation: cacheGeneration
+    }).then((ok) => {
+      if (!ok) return
+      thumbsKept.add(pair)
+      if (thumbsKept.size > THUMBS_KEPT_MAX) thumbsKept.delete(thumbsKept.values().next().value)
+    })
+  }
+  return { keep, check }
+}
+
+// Native: kept picture URI -> the rows showing it. The store protects a URI
+// it handed out from a trim until it is released, so the last row to let
+// go releases it.
+const thumbHolds = new Map()
+
+function holdThumb (uri) {
+  thumbHolds.set(uri, (thumbHolds.get(uri) || 0) + 1)
+}
+
+function letGoThumb (uri) {
+  const n = (thumbHolds.get(uri) || 1) - 1
+  if (n > 0) {
+    thumbHolds.set(uri, n)
+    return
+  }
+  thumbHolds.delete(uri)
+  try { keptStore.releaseKept(uri) } catch {}
+}
+
+// The kept decrypted picture for a valid groupThumb, or null: a file URI on
+// native, a blob: URL of the kept bytes on the web (revoked when let go of).
+// Only once the block list allows a copy of this author to be read.
+function useKeptGroupThumb (thumb) {
+  const author = thumb !== null ? thumb.author : null
+  const sha = thumb !== null ? thumb.sha : null
+  // copyReadAllowed reads the block list, which changes with no prop: the
+  // blocks context redraws this row when it arrives or changes.
+  useBlocks()
+  const readable = author !== null && copyReadAllowed(author)
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    if (!readable) {
+      setResult(null)
+      return
+    }
+    let alive = true
+    let made = null
+    let held = null
+    let got = null
+    try {
+      got = keptStore.keptGroupThumb(author, sha)
+    } catch {}
+    if (typeof got === 'string') {
+      held = got
+      holdThumb(got)
+      if (isShownUrl(got)) setResult({ author, sha, url: got })
+    } else if (got && typeof got.then === 'function') {
+      got.then((bytes) => {
+        if (!alive || !(bytes instanceof Uint8Array) || bytes.byteLength === 0) return
+        // A block that landed while the store read wins.
+        if (!copyReadAllowed(author)) return
+        let url = null
+        try {
+          url = urlFromBytes(bytes, 'image/jpeg')
+        } catch {}
+        if (!isShownUrl(url)) return
+        made = url
+        setResult({ author, sha, url })
+      }, () => {})
+    }
+    return () => {
+      alive = false
+      if (made !== null) revokeUrl(made)
+      if (held !== null) letGoThumb(held)
+    }
+  }, [author, sha, readable])
+  return readable && result !== null && result.author === author && result.sha === sha ? result.url : null
+}
+
+// A groupThumb prop both strings of 64 lowercase hex, else null.
+function validGroupThumb (thumb) {
+  return thumb && typeof thumb === 'object' && typeof thumb.author === 'string' && HEX64.test(thumb.author) &&
+    typeof thumb.sha === 'string' && HEX64.test(thumb.sha)
+    ? { author: thumb.author, sha: thumb.sha }
+    : null
+}
+
 // First letter of the first and last word, or two letters of a single word;
 // '' when the name is missing or blank.
 function initialsFromName (name) {
@@ -212,7 +389,7 @@ function initialsFromName (name) {
   return ''
 }
 
-function usePrivateAvatarUrl (mediaAuthor, item) {
+function usePrivateAvatarUrl (mediaAuthor, item, keepThumb) {
   const node = useNodeHandle()
   const identity = useMemberKey()
   const ref = { kind: 'group', diary: mediaAuthor, item }
@@ -222,13 +399,17 @@ function usePrivateAvatarUrl (mediaAuthor, item) {
   const [attempt, setAttempt] = useState(0)
   const [result, setResult] = useState(null)
   const autoRef = useRef({ key: null, node: null, done: 0 })
+  const keeping = key !== null && keepThumb === true
   useEffect(() => onChatMediaReturn(() => setAttempt((n) => n + 1)), [])
   useEffect(() => {
     if (autoRef.current.key !== key || autoRef.current.node !== node) autoRef.current = { key, node, done: 0 }
     if (key === null) return
     let alive = true
     let timer = null
-    sourceFor(ref, { node, identity, display, fetchDeps: { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) } }).then((entry) => {
+    const fetchDeps = { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) }
+    const keeper = keeping ? groupThumbKeeper(mediaAuthor, item.plainSha256) : null
+    const keepDeps = keeper !== null ? { keep: keeper.keep, keepCheck: keeper.check, readFile: readLocalBytes } : {}
+    sourceFor(ref, { node, identity, display, fetchDeps, ...keepDeps }).then((entry) => {
       if (!alive) return
       setResult({ key, attempt, node, entry })
       // Private blocks may arrive after the row, so retry only transient reads.
@@ -243,7 +424,7 @@ function usePrivateAvatarUrl (mediaAuthor, item) {
       alive = false
       if (timer !== null) clearTimeout(timer)
     }
-  }, [key, attempt, node])
+  }, [key, attempt, node, keeping])
   const entry = key !== null && result && result.key === key && result.attempt === attempt && result.node === node ? result.entry : null
   return entry && entry.mime === 'image/jpeg' && entry.w === 512 && entry.h === 512 && isShownUrl(entry.uri) ? entry.uri : null
 }
@@ -252,12 +433,20 @@ export function initialsSize (size) {
   return Math.max(8, Math.round(size * 0.36))
 }
 
-export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, privateItem, persist = false, localUri, shape = 'circle' }) {
+export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, privateItem, persist = false, localUri, shape = 'circle', groupThumb = null, keepGroupThumb = false }) {
   const { colors } = useTheme()
   const privateImage = privateItem !== undefined && privateItem !== null
-  const avatar = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist === 'peek' ? 'peek' : persist !== false)
+  const avatar = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persistMode(persist))
   const fetched = avatar.url
-  const opened = usePrivateAvatarUrl(mediaAuthor, privateImage && picture == null ? privateItem : null)
+  const opened = usePrivateAvatarUrl(mediaAuthor, privateImage && picture == null ? privateItem : null, keepGroupThumb === true)
+  // The kept picture stands in only for the same picture: a live item with
+  // another plainSha256 or author, or a public picture, hides it.
+  const asked = validGroupThumb(groupThumb)
+  const thumb = asked !== null && picture == null && (!privateImage ||
+    (validPrivateGroupImage(privateItem) && privateItem.plainSha256 === asked.sha && mediaAuthor === asked.author))
+    ? asked
+    : null
+  const keptThumb = useKeptGroupThumb(thumb)
   // The URL that failed to render; the initials stay for it.
   const [broken, setBroken] = useState(null)
   const reloadedRef = useRef(new Set())
@@ -266,9 +455,12 @@ export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, r
   const [reloads, setReloads] = useState(0)
   // A local URL that failed (primeAvatar may revoke it when the cache already
   // holds a verified copy) falls back to the fetched one.
-  const uri = privateImage ? opened : isShownUrl(localUri) && localUri !== broken ? localUri : fetched
+  const live = privateImage ? opened : isShownUrl(localUri) && localUri !== broken ? localUri : fetched
+  const uri = live !== null ? live : keptThumb
   const photo = uri !== null && uri !== broken ? uri : null
-  useEffect(() => (privateImage && photo !== null ? pinChatMedia(photo) : undefined), [privateImage, photo])
+  // Only the node's own URI is chat media; a kept picture is not pinned.
+  const pinned = privateImage && photo !== null && photo === opened ? photo : null
+  useEffect(() => (pinned !== null ? pinChatMedia(pinned) : undefined), [pinned])
   const onImageError = () => {
     const cached = !privateImage && avatar.reload !== null && photo === fetched
     const out = avatarErrorStep(reloadedRef.current, { key: avatar.key, cached })

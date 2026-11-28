@@ -666,13 +666,20 @@ export function identityOf (names, author, item) {
 // useThreadRowCache) and a string `rowKey`, the same props object comes back
 // while what the row shows is unchanged, so a memoized PostRow skips its
 // render; its callbacks read the newest handlers and engagement at call time.
-export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {}, cache, rowKey }) {
+// `originals` (a Map ref -> post item, optional): a quoted post the peeks do
+// not hold, as Membro's stored rows show it before the live page.
+// `strangerPersist` (optional, false: never kept): the persist of the photos
+// of a row, or of its quoted post, whose author is neither own nor followed.
+// Membro passes 'copy', so a reopened profile paints a stranger's quote or
+// repost from the copy store.
+export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {}, cache, rowKey, originals = null, strangerPersist = false }) {
   const offers = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function')
   const has = (k) => offers.includes(k)
   const ref = refOf(item.author, item.seq)
   const authorProfile = names.profileOf(item.author)
   const qref = item.quote ? refOf(item.quote.author, item.quote.seq) : null
-  const q = qref !== null && peeked ? postAt(peeked, qref) : null
+  const q = qref === null ? null : (peeked ? postAt(peeked, qref) : null) || (originals instanceof Map ? originals.get(qref) || null : null)
+  const stranger = strangerPersist === 'copy' ? 'copy' : false
   const qProfile = q ? names.profileOf(q.author) : null
   const parentProfile = item.replyTo ? names.profileOf(item.replyTo.author) : null
   const acting = actingPageKey()
@@ -684,9 +691,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     if (item.quote) {
       if (q) {
         const qwho = identityOf(names, q.author, q)
-        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
+        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)) || stranger, missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
       } else {
-        quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => live.handlers.onOpenThread({ ref: qref }) }
+        quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: stranger, missing: true, onOpen: () => live.handlers.onOpenThread({ ref: qref }) }
       }
     }
     const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
@@ -727,7 +734,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       // A post only: the poll card asks the seeder and the own diary (a page's, its status).
       ...(pollable && Array.isArray(item.poll) ? { poll: item.poll } : {}),
       ...(pollable && item.event && typeof item.event === 'object' ? { event: item.event } : {}),
-      persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
+      persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)) || stranger,
       now,
       quote,
       repostedBy: null,
@@ -771,6 +778,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     now,
     ownKey,
     follows,
+    stranger,
     eng: !!eng,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',

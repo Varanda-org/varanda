@@ -620,6 +620,9 @@ const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 
 const noop = () => {}
 
+// log.read `posts` (docs/rpc.md 5.12): a deleted slot has no type to keep.
+const isPublication = (e) => e.record !== null && typeof e.record === 'object' && (e.record.type === 'post' || e.record.type === 'repost')
+
 // ---- error mapping (A6), the table of @varanda/core lib/session.js ----
 
 const USAGE_MESSAGES = new Set([
@@ -1063,6 +1066,7 @@ function createBrowserSession ({
 
   let emitter = null
   let chain = Promise.resolve()
+  let listWrites = Promise.resolve() // see listWrite
   let queued = 0 // operations accepted and not finished
   let closed = false
   let closing = null
@@ -2404,6 +2408,31 @@ function createBrowserSession ({
       const settled = () => { queued-- }
       chain = p.then(settled, settled)
       return p
+    }
+  }
+
+  // block.list and mute.list answer off the chain (a reopen holds every
+  // stored row until it has the block list), so each request that writes
+  // the member's blocks or mutes also joins this tail when it arrives: a
+  // list still sees every such write that arrived before it, a write whose
+  // client gave up included. A failed write fails only its own answer.
+  function listWrite (fn) {
+    return (...args) => {
+      const p = fn(...args)
+      const prev = listWrites
+      listWrites = p.then(() => prev, () => prev)
+      return p
+    }
+  }
+
+  async function listRead (read) {
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    await listWrites
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    try {
+      return { keys: [...await read(storage)] }
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
     }
   }
 
@@ -4839,12 +4868,12 @@ function createBrowserSession ({
       return seenSync.sign({ nonce, action }, keyPair, own)
     }),
 
-    'seen.merge': serial(async ({ blob, avisos, unchanged }) => {
+    'seen.merge': listWrite(serial(async ({ blob, avisos, unchanged }) => {
       const own = await seenOwn()
       const r = await seenSync.merge({ blob, avisos, unchanged }, keyPair, own)
       if (r.dmChanged || r.groupChanged) seenChanged()
       return r
-    }),
+    })),
 
     // The key the app derives its once-marks with (docs/rpc.md 5.151): keyed
     // by the identity secret like the notice seen tokens, so a mark that
@@ -5849,7 +5878,7 @@ function createBrowserSession ({
     // fails: each only warns. Unlocked only, as follow.add. Nothing reaches the
     // other person: the unfollow is an ordinary follow record, and the
     // conversation op is sealed to the own box.
-    'block.set': serialDm(async ({ key, on }, epoch) => {
+    'block.set': listWrite(serialDm(async ({ key, on }, epoch) => {
       const own = await requireUnlocked()
       if (key === own) throw new UsageError('não é possível bloquear a própria chave')
       const r = applyBlock(await store.readMemberBlocks(storage), key, on, Math.floor(Date.now() / 1000))
@@ -5874,10 +5903,11 @@ function createBrowserSession ({
         }
       }
       return { changed: r.changed, total: blockedKeys(r.entries).size }
-    }),
+    })),
 
-    // kv only, works locked: the screens hide these keys at once.
-    'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
+    // kv only, works locked: the screens hide these keys at once. Off the
+    // chain, behind the block and mute writes only (listWrite).
+    'block.list': () => listRead(member.memberBlocks),
 
     // The applied moderation list's number and dates (docs/rpc.md 5.177):
     // kv only, works locked.
@@ -5886,7 +5916,7 @@ function createBrowserSession ({
     // what A Rua and Avisos show and nothing else: no follow, no message
     // state, nothing that reaches the other person. Unlocked only, as
     // block.set, so a signed-out browser cannot change the account's list.
-    'mute.set': serial(async ({ key, on }) => {
+    'mute.set': listWrite(serial(async ({ key, on }) => {
       const own = await requireUnlocked()
       if (key === own) throw new UsageError('não é possível silenciar a própria chave')
       const r = applyMute(await store.readMemberMutes(storage), key, on, Math.floor(Date.now() / 1000))
@@ -5896,10 +5926,10 @@ function createBrowserSession ({
         seenChanged()
       }
       return { changed: r.changed, total: mutedKeys(r.entries).size }
-    }),
+    })),
 
     // kv only, works locked, as block.list.
-    'mute.list': serial(async () => ({ keys: [...await member.memberMutes(storage)] })),
+    'mute.list': () => listRead(member.memberMutes),
 
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
@@ -5928,21 +5958,24 @@ function createBrowserSession ({
       return { follows: follows.slice(offset, offset + limit), total: follows.length }
     }),
 
-    'log.read': serial(async ({ author, limit, before }) => {
+    'log.read': serial(async ({ author, limit, before, posts }) => {
       const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
       // Folded over every held entry, before the window: an edit sits after
       // its post and may fall outside the page the post is in.
       const edits = editsOf(all)
+      // With `posts`, the window and entriesTruncated count publications
+      // only, so a page of likes never reaches the Publicações tab empty.
+      const pool = posts === true ? all.filter(isPublication) : all
       // The window ends at `before` (exclusive), by seq: a followed diary's
       // entries skip the blocks not stored, the own diary's are dense (seq
       // = position), so there this is the slice clamped to the length.
-      let end = all.length
+      let end = pool.length
       if (before !== undefined) {
-        while (end > 0 && all[end - 1].seq >= before) end--
+        while (end > 0 && pool[end - 1].seq >= before) end--
       }
       const start = Math.max(0, end - limit)
-      const window = all.slice(start, end)
+      const window = pool.slice(start, end)
       const entries = []
       const invalid = []
       for (const { seq, record, deleted } of window) {
@@ -7285,7 +7318,8 @@ function createBrowserSession ({
   // marker, and locks both keys; 'config' and 'follows' stay. A sync in
   // progress is stopped and not restarted.
   // previous: the DM unlock this reset superseded (supersedeDmUnlock).
-  const resetChain = serial(async ({ previous }) => {
+  // It empties the block and mute lists, so it joins listWrite as well.
+  const resetChain = listWrite(serial(async ({ previous }) => {
     peeker.abort()
     peeking = null
     noticer.abort()
@@ -7344,7 +7378,7 @@ function createBrowserSession ({
     drainRefusals = 0
     lastFoldLength = null
     foldLength = null
-  })
+  }))
 
   function attach (emit) {
     if (typeof emit !== 'function') throw new TypeError('emit required')
