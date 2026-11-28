@@ -29,6 +29,9 @@ const desc = (over = {}) => ({
 // Every retainKept call of any fake store: the registered one is made by an
 // earlier test.
 const retained = []
+// What every fake store's keepOnlyKeptAuthors answers (the deleted URIs on
+// the phone, a promise on the web); undefined is a store that cannot say.
+let keepOnlyAnswer
 
 function fakeStore () {
   const files = new Map()
@@ -49,7 +52,7 @@ function fakeStore () {
     },
     dropKeptRanges (ranges) { calls.dropKeptRanges.push(ranges); files.clear() },
     dropKeptAuthors (keys) { calls.dropKeptAuthors.push([...keys]); files.clear() },
-    keepOnlyKeptAuthors (keys) { calls.keepOnlyKeptAuthors.push([...keys]) },
+    keepOnlyKeptAuthors (keys) { calls.keepOnlyKeptAuthors.push([...keys]); return keepOnlyAnswer },
     wipeKept () { calls.wipeKept++; files.clear() },
     retainKept (kinds, entries) { retained.push([kinds, entries]); files.clear() }
   }
@@ -226,6 +229,82 @@ test('a purge clears the in-memory URL cache so the next request loads again', a
     cache.clear()
   }
   t.ok(released.includes('file:///kept/posts/x1'), 'cleared URLs go through revoke')
+})
+
+// A keep-only (the follow list arriving) deletes only the kept files of
+// authors no longer followed: the photos already on screen keep their URLs.
+async function keepOnlyCache (t) {
+  const { registerKeptStore } = await loadKeptMod()
+  const caches = await loadCaches()
+  const { createMediaCache, onRevokedRanges } = await loadCache()
+  const released = []
+  const cache = createMediaCache({ max: 8, concurrency: 2, revoke: (url) => released.push(url) })
+  registerKeptStore({ onRevokedRanges, bumpCacheGeneration: caches.bumpCacheGeneration, registerLocalCache: caches.registerLocalCache, store: fakeStore(), cache })
+  t.teardown(() => { keepOnlyAnswer = undefined })
+  await cache.get('gone', async () => 'file:///kept/posts/gone')
+  await cache.get('kept', async () => 'file:///kept/posts/kept')
+  await cache.get('shown', async () => 'blob:shown')
+  return { caches, cache, released }
+}
+
+const settleLoads = () => new Promise((resolve) => setImmediate(resolve))
+
+test('a keep-only lets go of only the kept files it deleted', async (t) => {
+  const { caches, cache, released } = await keepOnlyCache(t)
+  const { registerKeptStore } = await loadKeptMod()
+  const { onRevokedRanges } = await loadCache()
+  let plainCleared = 0
+  registerKeptStore({ onRevokedRanges, bumpCacheGeneration: caches.bumpCacheGeneration, registerLocalCache: caches.registerLocalCache, store: fakeStore(), cache: { clear () { plainCleared++ } } })
+  keepOnlyAnswer = ['file:///kept/posts/gone']
+  caches.keepOnlyAuthors(new Set([A]))
+  t.is(cache.peek('gone'), null, 'the deleted file is forgotten')
+  t.is(cache.peek('kept'), 'file:///kept/posts/kept', 'a kept file that stays still answers')
+  t.is(cache.peek('shown'), 'blob:shown', 'a fetched photo on screen is not released')
+  t.alike(released, ['file:///kept/posts/gone'])
+  t.is(plainCleared, 1, 'a cache that cannot forget one URL is cleared')
+})
+
+test('a keep-only that deleted nothing leaves the memory cache and loads in flight alone', async (t) => {
+  const { caches, cache, released } = await keepOnlyCache(t)
+  const gate = deferred()
+  let loads = 0
+  const pending = cache.get('loading', () => { loads++; return gate.promise })
+  await settleLoads()
+  t.is(loads, 1, 'the load is running')
+  keepOnlyAnswer = []
+  caches.keepOnlyAuthors(new Set([A]))
+  gate.resolve('blob:loaded')
+  t.is(await pending, 'blob:loaded')
+  t.is(loads, 1, 'no second load')
+  for (const key of ['gone', 'kept', 'shown', 'loading']) t.ok(cache.peek(key) !== null, key + ' stays')
+  t.alike(released, [])
+})
+
+test('a keep-only answered later (the web store) leaves the memory cache alone', async (t) => {
+  const { caches, cache, released } = await keepOnlyCache(t)
+  keepOnlyAnswer = Promise.resolve(true)
+  caches.keepOnlyAuthors(new Set([A]))
+  await keepOnlyAnswer
+  for (const key of ['gone', 'kept', 'shown']) t.ok(cache.peek(key) !== null, key + ' stays')
+  t.alike(released, [])
+})
+
+test('a load that read a file the keep-only deleted is not stored and runs again', async (t) => {
+  const { caches, cache, released } = await keepOnlyCache(t)
+  const gate = deferred()
+  const urls = [gate.promise, Promise.resolve('file:///kept/posts/again')]
+  let loads = 0
+  const pending = cache.get('k', () => urls[loads++])
+  await settleLoads()
+  t.is(loads, 1, 'the load is running')
+  keepOnlyAnswer = ['file:///kept/posts/gone']
+  caches.keepOnlyAuthors(new Set([A]))
+  gate.resolve('file:///kept/posts/gone')
+  t.is(await pending, 'file:///kept/posts/again')
+  t.is(loads, 2)
+  t.is(cache.peek('k'), 'file:///kept/posts/again')
+  t.is(cache.peek('shown'), 'blob:shown')
+  t.is(released.filter((url) => url === 'file:///kept/posts/gone').length, 2, 'the stored entry and the late read are both released')
 })
 
 test('a load queued behind the limit before a wipe does not keep after it', async (t) => {

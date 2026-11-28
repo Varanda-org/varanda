@@ -665,6 +665,40 @@ test('a load running when the cache is cleared is not stored and runs once more'
   t.alike(evicted, ['file:///kept/deleted'], 'and its kept in-use mark too')
 })
 
+// A keep-only that deleted kept files forgets those entries one by one and
+// restarts the loads: what is on screen keeps its URL.
+test('restartLoads keeps the stored URLs and makes running loads run once more', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const evicted = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  cache.onEvicted((url) => evicted.push(url))
+  const shown = hex('b') + ':1:1:' + hex('e')
+  t.is(await cache.get(shown, async () => 'blob:shown'), 'blob:shown')
+  const ahead = hex('c') + ':1:1:' + hex('e')
+  const early = deferred()
+  t.ok(cache.prefetch(ahead, () => early.promise), 'a prefetch is queued')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const key = hex('a') + ':1:1:' + hex('e')
+  const first = deferred()
+  const urls = [first.promise, Promise.resolve('blob:fresh')]
+  let calls = 0
+  const got = cache.get(key, () => urls[calls++])
+  await tick()
+  t.is(calls, 1, 'the first load is running')
+  cache.restartLoads()
+  t.is(cache.peek(shown), 'blob:shown', 'a stored URL stays')
+  early.resolve('file:///kept/early')
+  first.resolve('file:///kept/deleted')
+  t.is(await got, 'blob:fresh', 'the caller gets the second load')
+  t.is(calls, 2)
+  await tick()
+  t.is(cache.peek(key), 'blob:fresh')
+  t.is(cache.peek(ahead), null, 'a running prefetch is cancelled, not stored')
+  t.alike(revoked.sort(), ['file:///kept/deleted', 'file:///kept/early'], 'only the late reads are released')
+  t.alike(evicted.sort(), ['file:///kept/deleted', 'file:///kept/early'])
+})
+
 test('a load still queued when the cache is cleared runs once', async (t) => {
   const { createMediaCache } = await load()
   const cache = createMediaCache({ concurrency: 1 })
