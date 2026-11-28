@@ -19,7 +19,11 @@
 // cache: 'no-store' on the web so nothing of them is kept on the device
 // (natively no cache option: see fetchMedia). persist 'peek' (a stranger the
 // Espiadinha shows) is fetched the same way; only the bounded peek kinds of
-// the kept store may hold it.
+// the kept store may hold it. persist 'copy' (a reopened screen's saved copy)
+// is fetched as true for a followed author and as false for anyone else
+// (../media/keptLoad.js fetchPersist). On the web every photo is fetched
+// no-store, whatever persist says: the kept store there is IndexedDB, and the
+// browser HTTP cache is never used to keep one (../media/keep.web.js).
 // `uri` (instead of author and descriptor): a device-local blob: or file://
 // URI another module already verified (chat photos, ../media/chatMedia.js);
 // it is shown as is and nothing is fetched. Any other scheme is refused.
@@ -39,8 +43,8 @@ import { prefetchLoad } from '../media/prefetchLoad'
 import { ScreenCovered, ScreenVisible } from './screenVisible'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import * as keptStore from '../media/keep'
-import { loadKept, registerKeptStore } from '../media/keptLoad'
-import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
+import { copyKindOf, fetchPersist, loadKept, persistMode, registerKeptStore } from '../media/keptLoad'
+import { bumpCacheGeneration, cacheGeneration, copyReadAllowed, deniedAuthor, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
 import { MediaBackdrop } from './MediaBackdrop'
@@ -77,27 +81,34 @@ export const KeptOnlyContext = createContext(false)
 
 // -> the kept file URI, or null. Only what loadKept would keep may be read:
 // persist and a lowercase hex64 author. Never a peek copy: the cold-start
-// preview does not show the Espiadinha.
+// preview does not show the Espiadinha. persist 'copy' reads the main kind,
+// then the copy kind once loadKept would read it (copyReadAllowed), never
+// for a denied author.
 export function keptOnlyUrl (kind, author, d, persist) {
   if (persist === false || persist === 'peek' || typeof author !== 'string' || !/^[0-9a-f]{64}$/.test(author)) return null
   try {
+    if (persist === 'copy' && deniedAuthor(author)) return null
     const url = keptStore.keptUrl(kind, author, d)
-    return isShownUrl(url) ? url : null
+    if (isShownUrl(url)) return url
+    if (persist !== 'copy' || !copyReadAllowed(author)) return null
+    const copy = keptStore.keptUrl(copyKindOf(kind), author, d)
+    return isShownUrl(copy) ? copy : null
   } catch {
     return null
   }
 }
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
-// keepAs: true, false or 'peek'. A stranger's photo ('peek') is fetched as
-// transient (persist false): never the unmanaged HTTP cache, only the
-// bounded peek kinds of the kept store may hold it.
+// keepAs: true, false, 'peek' or 'copy', handed to loadKept as is. A
+// stranger's photo ('peek', or 'copy' of an author not followed) is fetched
+// as transient (fetchPersist false): never the unmanaged HTTP cache, only the
+// bounded kinds of the kept store may hold it.
 // thumb true: a post thumbnail. Fetched bytes, and the web's kept bytes,
 // must decode to at most 640 px a side before they are shown or kept; a
 // native kept URI was written only after that check. Any error is final (no
 // retry ladder): the row moves on to the full size.
 function useMedia (author, descriptor, keepAs, thumb = false) {
-  const persist = keepAs === 'peek' ? false : keepAs
+  const persist = persistMode(keepAs)
   const hosted = useHosted()
   const keptOnly = useContext(KeptOnlyContext) === true
   const canFetch = !keptOnly && hosted === true
@@ -131,11 +142,11 @@ function useMedia (author, descriptor, keepAs, thumb = false) {
       kind: 'posts',
       author,
       d: descriptor,
-      persist: keepAs,
+      persist,
       keptUrl: keptStore.keptUrl,
       keptBytes: keptStore.keptBytes,
       keep: keptStore.keep,
-      fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() }),
+      fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist: fetchPersist(persist, author), fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration,
@@ -316,7 +327,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
   const order = variants ? rowVariants({ media: postMedia, thumbs, index, widthPx, dpr }) : null
   const orderKey = order === null ? '' : order.map((d) => (validDescriptor(d) ? mediaKey(d) : '')).join('|')
   const [fallback, setFallback] = useState({ key: '', step: 0 })
-  const keep = persist === 'peek' ? 'peek' : persist !== false
+  const keep = persistMode(persist)
   // Kept-only cold start fetches nothing, so it shows whichever step is kept.
   const keptOnly = useContext(KeptOnlyContext) === true
   const keptStep = useMemo(() => (keptOnly && order !== null ? firstKept(order, (d) => keptOnlyUrl('posts', author, d, keep) !== null) : null), [keptOnly, orderKey, author, keep])

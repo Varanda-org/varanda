@@ -1452,6 +1452,35 @@ test('push: the list outlives a worker restart', async (t) => {
   t.is(reply.options.tag, 'varanda-dm-wake-quiet')
 })
 
+// Sair, Recomeçar or another owner sends empty lists (src/pushBlocks.web.js
+// clearPushLists): the worker, also a restarted one, must forget the keys.
+test('push: empty lists, as sent when the account leaves, clear what the worker kept, also after a restart', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code } = readWorker(dist)
+  const page = fakeWindow(ORIGIN + '/')
+  const first = loadWorker(code, serveDist(dist))
+  await message(first, { type: 'varanda-blocks', keys: [ACTOR] }, page)
+  await message(first, { type: 'varanda-mutes', keys: [THIRD] }, page)
+  const hidden = await push(first, pushData(valid()))
+  t.is(hidden.options.tag, 'varanda-dm-wake-quiet', 'blocked before the clear')
+  const muted = await push(first, pushData(valid({ actor: THIRD })))
+  t.is(muted.options.tag, 'varanda-dm-wake-quiet', 'muted before the clear')
+
+  await message(first, { type: 'varanda-blocks', keys: [] }, page)
+  await message(first, { type: 'varanda-mutes', keys: [] }, page)
+  const shown = await push(first, pushData(valid()))
+  t.is(shown.options.body, 'Ana respondeu ao seu post', 'shown after the clear')
+  const unmuted = await push(first, pushData(valid({ actor: THIRD })))
+  t.is(unmuted.options.body, 'Ana respondeu ao seu post', 'the mute list is cleared too')
+
+  const again = loadWorker(code, serveDist(dist), { caches: first.caches })
+  const restarted = await push(again, pushData(valid()))
+  t.is(restarted.options.body, 'Ana respondeu ao seu post', 'a restarted worker reads the empty list')
+  const restartedMuted = await push(again, pushData(valid({ actor: THIRD })))
+  t.is(restartedMuted.options.body, 'Ana respondeu ao seu post')
+})
+
 test('push: a report that is not from an app window, or not a clean list, changes nothing', async (t) => {
   const w = renderedWorker()
   const page = fakeWindow(ORIGIN + '/')

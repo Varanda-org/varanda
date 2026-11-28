@@ -4,7 +4,9 @@
 // were seen), null when the profile has none, else a fresh descriptor copy.
 // A verified diary.peek is kept as an entry (peekedEntry) that outlives a
 // `missing` answer of profile.read (missingEntry) and replaces a seed
-// (peekReplaces), until the diary is gone (forgottenEntry).
+// (peekReplaces), until the diary is gone (forgottenEntry). A peek an earlier
+// run verified and the device saved (savedPeeks) is a seed that a `missing`
+// answer also keeps (missingAnswer) until this run's peek answers.
 
 import { avatarOf, sameAvatar } from './media/avatar.js'
 
@@ -75,6 +77,123 @@ export function peekedEntry (value) {
 // kept for that key, or null (no showable diary).
 export function missingEntry (peeked) {
   return peeked ? { ...peeked } : null
+}
+
+// The `missing` answer for `key` with both kept names (Maps of lowercase keys
+// to peekedEntry values): this run's verified peek first, else a peek saved
+// on the device (savedPeeks), which keeps the row named while the peek is
+// asked again. A denied author's (`refused`) saved peek is never used.
+export function missingAnswer (peeked, saved, key, refused = () => false) {
+  return missingEntry(peeked.get(key) ?? (refused(key) ? undefined : saved.get(key)))
+}
+
+// The saved peeks of `entries` ([key, { name, username, avatar }] pairs, a
+// stored copy of names an earlier run verified) to remember: only for a key
+// the cache `known` has no entry for, or only the null a `missing` answer
+// left (seeding before or after that answer must agree), and `peeked` (this
+// run's verified peeks) does not hold, never for a key `refused` says (a
+// denied author), and only when the fields name something.
+// -> [lowercase key, peekedEntry] pairs.
+export function savedPeeks (known, peeked, entries, refused = () => false) {
+  const out = []
+  const seen = new Set()
+  for (const pair of Array.isArray(entries) ? entries : []) {
+    if (!Array.isArray(pair) || typeof pair[0] !== 'string') continue
+    const key = pair[0].toLowerCase()
+    if (seen.has(key) || (known && known.has(key) && known.get(key) !== null) || peeked.has(key) || refused(key)) continue
+    seen.add(key)
+    const entry = peekedEntry(pair[1])
+    if (entry !== null) out.push([key, entry])
+  }
+  return out
+}
+
+// A saved peek as a seed (applySeed): it is not loaded, so profile.read is
+// still asked and its answer wins.
+export function savedSeed (entry) {
+  return { name: entry.name, username: entry.username, avatar: entry.avatar }
+}
+
+// Whether a stored copy saved for `owner` belongs to the identity `own` (the
+// lowercase own key): neither may be missing.
+export function sameOwner (owner, own) {
+  return typeof owner === 'string' && typeof own === 'string' && own !== '' && owner.toLowerCase() === own.toLowerCase()
+}
+
+// Whether `entry` (a cache entry) is still what the saved peek `saved` made
+// of it: its seed, or the `missing` answer that kept it (loaded or marked
+// stale since).
+function fromSaved (entry, saved) {
+  if (!entry) return false
+  return [applySeed(null, savedSeed(saved)), missingEntry(saved)].some((e) => sameEntry({ ...entry, loaded: e.loaded }, e))
+}
+
+// seedPeeked's rule. Remembers the saved peeks of `entries` (savedPeeks) in
+// `saved` (oldest first, at most `max` keys) and says what the cache `known`
+// gets: `seeds` ([key, savedSeed] pairs to apply) for an absent key, and in
+// `next` (a copy of `known`, or null when nothing else changes) the
+// `missing` answer for a key whose entry is that answer's null. A key evicted
+// past `max` is never re-checked, so its name must not stay: one evicted in
+// this call is not shown, and an older one loses the entry its saved seed
+// still makes (the page hint `hintOf(entry)` stays). `held` (profile
+// answers) and `peeked` (verified peeks) of this run are never touched.
+// -> { seeds, next }.
+export function seedSaved ({ known, peeked, held, saved, entries, refused = () => false, max, hintOf = () => null }) {
+  const fresh = new Map()
+  for (const [key, entry] of savedPeeks(known, peeked, entries, refused)) {
+    saved.delete(key)
+    saved.set(key, entry)
+    fresh.set(key, entry)
+  }
+  let next = null
+  while (saved.size > max) {
+    const evicted = saved.keys().next().value
+    const entry = saved.get(evicted)
+    saved.delete(evicted)
+    if (fresh.delete(evicted) || held.has(evicted) || peeked.has(evicted)) continue
+    const old = known ? known.get(evicted) : undefined
+    if (!fromSaved(old, entry)) continue
+    const hint = hintOf(old)
+    next = next || new Map(known)
+    if (old.loaded === true) {
+      const forgotten = forgottenEntry(old, hint)
+      if (forgotten !== undefined) next.set(evicted, forgotten)
+      continue
+    }
+    // Not answered yet: the key goes back to unknown, so it is still asked.
+    const page = pageOnlyEntry(hint)
+    if (page === null) next.delete(evicted)
+    else next.set(evicted, page)
+  }
+  const seeds = []
+  for (const [key, entry] of fresh) {
+    if (known && known.get(key) === null) {
+      next = next || new Map(known)
+      next.set(key, missingAnswer(peeked, saved, key, refused))
+    } else {
+      seeds.push([key, savedSeed(entry)])
+    }
+  }
+  return { seeds, next }
+}
+
+// Whether `key` shows a saved peek this run has not verified again.
+export function isSavedPeekKey (saved, peeked, key) {
+  if (typeof key !== 'string') return false
+  const k = key.toLowerCase()
+  return saved.has(k) && !peeked.has(k)
+}
+
+// The entries a new epoch or generation starts the cache with: the saved
+// peeks as seeds, never one of a denied author (`refused`).
+export function savedRebuild (saved, refused = () => false) {
+  const out = new Map()
+  for (const [key, entry] of saved) {
+    if (refused(key)) continue
+    const seed = applySeed(null, savedSeed(entry))
+    if (seed !== null) out.set(key, seed)
+  }
+  return out
 }
 
 // A profile.read answer with no name, bio or photo at all (the profile record

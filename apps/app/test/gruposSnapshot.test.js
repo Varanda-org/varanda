@@ -116,7 +116,7 @@ test('Conversas stores only a complete group list, guarded by the generation', (
   const line = groupHook.split('\n').find((l) => l.includes('saveGroupSnapshot('))
   t.ok(line, 'the save is in the group hook')
   t.ok(/!partial && sameSnapshotBinding\(snapshotBinding, bindingRef\.current\)/.test(line), 'not partial, same identity')
-  t.ok(line.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)"))
+  t.ok(line.includes("saveGroupSnapshot('conversasGrupos', { ...snapshotBinding, blocked: blockedRef.current }, rowsForStorage(all), cacheGen)"))
   const load = groupHook.slice(groupHook.indexOf('const load = useCallback'))
   t.ok(load.indexOf('const cacheGen = cacheGeneration()') < load.indexOf("'community.list'"), 'generation read before the list')
 })
@@ -228,5 +228,78 @@ test('a partial load keeps the stored rows of the communities it missed', (t) =>
   const withStandalone = shown.concat([{ group: G4, community: null, role: 'member', seeded: true }])
   t.alike(merge(live, withStandalone, new Set([null])).map((r) => r.group), [G1, G4], 'incomplete standalone list: stored standalone row kept, community rows answered')
   const line = groupHook.split('\n').find((l) => l.includes('saveGroupSnapshot('))
-  t.ok(line.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)"), 'only live rows are saved')
+  t.ok(line.includes("saveGroupSnapshot('conversasGrupos', { ...snapshotBinding, blocked: blockedRef.current }, rowsForStorage(all), cacheGen)"), 'only live rows are saved')
+})
+
+const IMAGE = { core: '56'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 2, bytes: 40000, sha256: '78'.repeat(32), width: 512, height: 512 }
+const PRIVATE_IMAGE = { core: '56'.repeat(32), mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: '78'.repeat(32), key: '9a'.repeat(32), nonce: 'bc'.repeat(24), plainMime: 'image/jpeg', plainSha256: 'de'.repeat(32), w: 512, h: 512, ms: 0 }
+const IMAGE_AUTHOR = '9c'.repeat(32)
+
+test('a public group row keeps its image through the store; a block of its author strips it, a follow change keeps it', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const caches = await import('../src/localCaches.js')
+  const b = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME }
+  const live = [
+    { group: G1, community: C1, role: 'member', general: false, name: 'Praia', visibility: 'public', image: IMAGE, imageAuthor: IMAGE_AUTHOR, unread: 1 },
+    { group: G2, community: C1, role: 'member', general: false, name: 'Segredo', visibility: 'private', image: PRIVATE_IMAGE, imageAuthor: IMAGE_AUTHOR }
+  ]
+  const built = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live })
+  t.alike(built.body.rows[0], { community: C1, group: G1, role: 'member', general: false, name: 'Praia', image: IMAGE, imageAuthor: IMAGE_AUTHOR })
+  t.alike(built.body.rows[1], { community: C1, group: G2, role: 'member', general: false, name: null }, 'a private group never stores its image')
+  const text = JSON.stringify(built)
+  t.absent(text.includes('"key"') || text.includes('"nonce"') || text.includes('plainSha256'))
+
+  const texts = new Map()
+  const store = snap.createScreenSnapshotStore({ load: (k) => texts.get(k), save: (k, v) => { texts.set(k, v) }, clear: (k) => { texts.delete(k) } })
+  t.teardown(() => caches.wipeLocalCaches())
+  t.ok(store.saveScreenSnapshot('conversasGrupos', built, caches.cacheGeneration()))
+  t.alike(store.loadScreenSnapshot('conversasGrupos', b), built, 'the image round-trips')
+  caches.keepOnlyAuthors(new Set([OWN]))
+  t.is(texts.get('conversasGrupos'), text, 'a follow change leaves the rows as they are')
+  caches.dropAuthors(['ab'.repeat(32)])
+  t.alike(store.loadScreenSnapshot('conversasGrupos', b), built, 'a block of another author leaves the image')
+  caches.dropAuthors([IMAGE_AUTHOR])
+  const after = store.loadScreenSnapshot('conversasGrupos', b)
+  t.alike(after.body.rows, [
+    { community: C1, group: G1, role: 'member', general: false, name: 'Praia' },
+    { community: C1, group: G2, role: 'member', general: false, name: null }
+  ], 'the row stays, its image and author go')
+})
+
+test('a public group picture by a blocked author is not stored; the row is', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const b = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME }
+  const OTHER = 'ab'.repeat(32)
+  const live = [
+    { group: G1, community: C1, role: 'member', general: false, name: 'Praia', visibility: 'public', image: IMAGE, imageAuthor: IMAGE_AUTHOR },
+    { group: G2, community: C1, role: 'member', general: false, name: 'Serra', visibility: 'public', image: IMAGE, imageAuthor: OTHER }
+  ]
+  const blocked = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, blocked: new Set([IMAGE_AUTHOR.toUpperCase()]) })
+  t.alike(blocked.body.rows, [
+    { community: C1, group: G1, role: 'member', general: false, name: 'Praia' },
+    { community: C1, group: G2, role: 'member', general: false, name: 'Serra', image: IMAGE, imageAuthor: OTHER }
+  ], 'only the blocked author\'s picture goes')
+  t.ok(snap.parseScreenSnapshot(JSON.stringify(blocked), 'conversasGrupos', b), 'and it parses (five keys)')
+  const now = Date.now()
+  const plain = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, now })
+  t.alike(plain.body.rows[0], { community: C1, group: G1, role: 'member', general: false, name: 'Praia', image: IMAGE, imageAuthor: IMAGE_AUTHOR }, 'no blocked input: as before')
+  t.alike(snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: live, blocked: new Set(), now }), plain, 'nobody blocked: the same')
+  const hook = groupHook.slice(0, groupHook.indexOf('const load = useCallback'))
+  t.ok(/const blocks = useBlocks\(\)\s*const blockedRef = useRef\(blocks\.keys\)\s*blockedRef\.current = blocks\.keys/.test(hook), 'the save reads the block list of the latest render')
+})
+
+test('a stored group row from before the image, or with half of it, parses as it should', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const b = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME }
+  const built = snap.buildScreenSnapshot('conversasGrupos', { ...b, rows: [{ group: G1, community: C1, role: 'member', general: false, name: 'Praia', visibility: 'public', image: IMAGE, imageAuthor: IMAGE_AUTHOR }] })
+  const parse = (change) => {
+    const copy = JSON.parse(JSON.stringify(built))
+    change(copy.body.rows[0])
+    return snap.parseScreenSnapshot(JSON.stringify(copy), 'conversasGrupos', b)
+  }
+  t.alike(parse((r) => { delete r.image; delete r.imageAuthor }).body.rows[0], { community: C1, group: G1, role: 'member', general: false, name: 'Praia' }, 'an old row')
+  t.is(parse((r) => { delete r.imageAuthor }), null, 'image without author')
+  t.is(parse((r) => { delete r.image }), null, 'author without image')
+  t.is(parse((r) => { r.name = null }), null, 'an image under no name')
+  t.is(parse((r) => { r.image = { ...r.image, key: '9a'.repeat(32), nonce: 'bc'.repeat(24) } }), null, 'a key and nonce')
 })

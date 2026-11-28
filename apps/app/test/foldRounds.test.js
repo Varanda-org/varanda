@@ -404,11 +404,11 @@ test('A Rua\'s original() shows the last good copy and a quote keeps peek photos
   t.ok(original.includes('isBlocked: isBlockedNow'), 'and the live block list')
   t.ok(original.includes('blocksOk\n'), 'and whether it answered for this run')
   t.ok(arua.includes("const blocksOk = blocksNow.loadState === 'ok'"), 'read from useBlocks() at each render')
-  t.ok(arua.includes("social.persistOf(post.quote.author) || (strangerPersist === 'peek' ? 'peek' : false)"), 'a peek row\'s stranger quote is kept as peek')
+  t.ok(arua.includes("social.persistOf(post.quote.author) || (strangerPersist === 'peek' || strangerPersist === 'copy' ? strangerPersist : false)"), 'a peek or copy row\'s stranger quote is kept the same way')
   t.ok(arua.includes('persist: quotePersist,'), 'the quote carries it')
   t.ok(arua.includes('    quotePersist,\n'), 'and the row cache compares it')
-  t.is((quote.match(/q\.persist === true/g) || []).length, (quote.match(/'peek' : q\.persist === true/g) || []).length, 'no bare q.persist === true left')
-  t.is((quote.match(/q\.persist === 'peek' \? 'peek' : q\.persist === true/g) || []).length, 6, 'media, link thumbs and avatars pass peek through')
+  t.absent(/q\.persist === true|'peek' : q\.persist/.test(quote), 'no hand coercion of q.persist left')
+  t.is((quote.match(/persistMode\(q\.persist\)/g) || []).length, 6, 'media, link thumbs and avatars pass the mode through')
 })
 
 test('staleOf merges the previous stale map, never a dead, deleted or blocked ref, never a transient failure', async (t) => {

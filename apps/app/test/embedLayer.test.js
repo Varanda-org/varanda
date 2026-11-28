@@ -691,7 +691,7 @@ test('the card shows through the host and places the frame against the content c
 
 test('a quote is its own entry', (t) => {
   const quote = withoutComments(read('ui', 'QuoteCard.js'))
-  t.ok(quote.includes("persist: q.persist === 'peek' ? 'peek' : q.persist === true }} part='q' />"))
+  t.ok(quote.includes("persist: persistMode(q.persist) }} part='q' />"))
 })
 
 test('a hosted card leaving live drops its entry and releases once', async (t) => {

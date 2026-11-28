@@ -531,3 +531,223 @@ test('a retain forgets only the memory entries of the peek files it deleted', as
   t.is(cache.peek('stays'), u2, 'a retained entry stays')
   t.is(cache.peek('main'), 'file:///kept/posts/m', 'other entries stay')
 })
+
+test('persistMode, copyKindOf and fetchPersist', async (t) => {
+  const { persistMode, copyKindOf, fetchPersist } = await loadKeptMod()
+  const lc = await loadCaches()
+  t.teardown(() => lc.wipeLocalCaches())
+  t.is(persistMode('peek'), 'peek')
+  t.is(persistMode('copy'), 'copy')
+  t.is(persistMode(false), false)
+  t.is(persistMode(null), false)
+  t.is(persistMode(undefined), false)
+  t.is(persistMode(true), true)
+  t.is(persistMode('other'), true)
+  t.is(copyKindOf('avatars'), 'copyAvatars')
+  t.is(copyKindOf('posts'), 'copyPosts')
+  lc.wipeLocalCaches()
+  t.is(fetchPersist(true, STRANGER), true)
+  t.is(fetchPersist(false, A), false)
+  t.is(fetchPersist('peek', A), false)
+  t.is(fetchPersist('copy', A), false, 'allowed set unknown: not followed')
+  lc.setAllowedAuthors([A])
+  t.is(fetchPersist('copy', A), true, 'a followed author')
+  t.is(fetchPersist('copy', STRANGER), false, 'a stranger never reaches the HTTP cache')
+})
+
+// A fresh module instance per platform: the shared one is registered with a
+// fake store by an earlier test, and registerKeptStore runs once.
+async function platformKeptLoad (tag, httpCacheKeeps) {
+  const mod = await import('../src/media/keptLoad.js?' + tag)
+  const noop = () => {}
+  mod.registerKeptStore({ onRevokedRanges: noop, bumpCacheGeneration: noop, registerLocalCache: noop, store: { ...fakeStore(), httpCacheKeeps } })
+  return mod
+}
+
+test('fetchPersist: the web never uses the HTTP cache; native answers as before', async (t) => {
+  const lc = await loadCaches()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.wipeLocalCaches()
+  lc.setAllowedAuthors([A])
+  const webMod = await platformKeptLoad('web', false)
+  const nativeMod = await platformKeptLoad('native', true)
+  for (const mode of [true, 'copy', 'peek', false]) {
+    t.is(webMod.fetchPersist(mode, A), false, 'web, followed author, ' + mode)
+    t.is(webMod.fetchPersist(mode, STRANGER), false, 'web, stranger, ' + mode)
+  }
+  t.is(nativeMod.fetchPersist(true, A), true)
+  t.is(nativeMod.fetchPersist(true, STRANGER), true)
+  t.is(nativeMod.fetchPersist('copy', A), true)
+  t.is(nativeMod.fetchPersist('copy', STRANGER), false)
+  t.is(nativeMod.fetchPersist('peek', A), false)
+  t.is(nativeMod.fetchPersist(false, A), false)
+  const real = { web: await import('../src/media/keep.web.js') }
+  t.is(real.web.httpCacheKeeps, false, 'keep.web.js says its HTTP cache cannot be purged')
+})
+
+async function copySetup (over = {}) {
+  const lc = await loadCaches()
+  lc.wipeLocalCaches()
+  const s = await setup({ kind: 'avatars', author: STRANGER, persist: 'copy', ...over })
+  lc.setAllowedAuthors([A])
+  return { ...s, lc }
+}
+
+test('copy: a followed author is kept in the main kind, a stranger in the copy kind once blocks are known live', async (t) => {
+  const { loadKept, store, fetched, args, lc } = await copySetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  t.is(await loadKept({ ...args, author: A }), 'file:///kept/avatars/' + A + '-' + CORE + '-1', 'followed: main kind')
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'blocks unknown: a stranger is shown, not kept')
+  t.is(store.calls.keep, 1)
+  lc.noteBlocksSeeded(lc.wipeEpoch())
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'a seeded list keeps nothing')
+  t.is(store.calls.keep, 1)
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const uri = await loadKept(args)
+  t.is(uri, 'file:///kept/copyAvatars/' + STRANGER + '-' + CORE + '-1', 'kept under copyAvatars')
+  t.absent(store.files.has('avatars/' + STRANGER + '-' + CORE + '-1'), 'nothing in the main kind')
+  const n = fetched.n
+  t.is(await loadKept(args), uri, 'read back')
+  t.is(fetched.n, n, 'with no fetch')
+  t.is(await loadKept({ ...args, kind: 'posts' }), 'file:///kept/copyPosts/' + STRANGER + '-' + CORE + '-1', 'posts go to copyPosts')
+})
+
+test('copy: the allowed set unknown keeps nothing', async (t) => {
+  const { loadKept, store, args, lc } = await copySetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  lc.setAllowedAuthors(null)
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg')
+  t.is(await loadKept({ ...args, author: A }), 'blob:fresh-image/jpeg')
+  t.is(store.calls.keep, 0)
+})
+
+test('copy: a seeded list reads a copy file back before the blocks are known live', async (t) => {
+  const { loadKept, store, fetched, args, lc } = await copySetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  store.files.set('copyAvatars/' + STRANGER + '-' + CORE + '-1', 'file:///kept/copy')
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'no list: the copy file is not read')
+  t.is(fetched.n, 1)
+  lc.noteBlocksSeeded(lc.wipeEpoch())
+  t.is(await loadKept(args), 'file:///kept/copy', 'seeded: read')
+  t.is(fetched.n, 1)
+})
+
+test('copy: keptBytes of the copy kind under the generation and validate checks', async (t) => {
+  const reads = []
+  const held = { value: new Uint8Array([7, 7, 7, 7]) }
+  const { loadKept, fetched, args, lc } = await copySetup({
+    keptBytes: async (kind) => { reads.push(kind); return kind === 'copyAvatars' ? held.value : null },
+    urlFromBytes: (bytes, mime) => 'blob:held-' + bytes[0]
+  })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksSeeded(lc.wipeEpoch())
+  t.is(await loadKept(args), 'blob:held-7')
+  t.alike(reads, ['avatars', 'copyAvatars'], 'the main kind is read as bytes first, then the copy kind')
+  t.is(fetched.n, 0)
+  t.is(await loadKept({ ...args, validate: () => false }).catch((e) => e.message), 'foto inválida', 'held bytes failing validate fall through to the fetch')
+  t.is(fetched.n, 1)
+})
+
+// The web has no file URI: its main store answers through keptBytes only.
+test('copy: a main kind held as bytes answers first; the copy kind needs copyReadAllowed', async (t) => {
+  const reads = []
+  const held = new Map([['avatars', new Uint8Array([5, 5, 5, 5])], ['copyAvatars', new Uint8Array([7, 7, 7, 7])]])
+  const { loadKept, fetched, args, lc } = await copySetup({
+    keptBytes: async (kind) => { reads.push(kind); return held.get(kind) ?? null },
+    urlFromBytes: (bytes, mime) => 'blob:held-' + bytes[0]
+  })
+  t.teardown(() => lc.wipeLocalCaches())
+  t.is(await loadKept(args), 'blob:held-5', 'blocks unknown: the main kind still answers')
+  t.alike(reads, ['avatars'], 'and the copy kind is not asked')
+  held.delete('avatars')
+  reads.length = 0
+  t.is(await loadKept(args), 'blob:held-1', 'blocks unknown: no copy read, fetched')
+  t.alike(reads, ['avatars'])
+  t.is(fetched.n, 1)
+  lc.noteBlocksSeeded(lc.wipeEpoch())
+  reads.length = 0
+  t.is(await loadKept(args), 'blob:held-7', 'blocks known: the copy kind answers after a main miss')
+  t.alike(reads, ['avatars', 'copyAvatars'])
+  held.set('avatars', new Uint8Array([5, 5, 5, 5]))
+  lc.denyAuthors([STRANGER])
+  reads.length = 0
+  t.is(await loadKept(args), 'blob:held-1', 'a denied author: fetched and shown only')
+  t.alike(reads, [], 'no kind is read as bytes')
+})
+
+test('copy: a denied author keeps nothing and no copy file is read', async (t) => {
+  const { loadKept, store, fetched, args, lc } = await copySetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  store.files.set('copyAvatars/' + STRANGER + '-' + CORE + '-1', 'file:///kept/copy')
+  store.files.set('avatars/' + STRANGER + '-' + CORE + '-1', 'file:///kept/main')
+  lc.denyAuthors([STRANGER])
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'fetched and shown only')
+  t.is(store.calls.keptUrl, 0, 'no kept file is read')
+  t.is(fetched.n, 1)
+  t.is(store.calls.keep, 0)
+  lc.setAllowedAuthors([A, STRANGER])
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'a denied followed author is not kept either')
+  t.is(store.calls.keep, 0)
+})
+
+test('copy: a main hit wins over a copy hit', async (t) => {
+  const { loadKept, store, args, lc } = await copySetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  store.files.set('copyAvatars/' + STRANGER + '-' + CORE + '-1', 'file:///kept/copy')
+  store.files.set('avatars/' + STRANGER + '-' + CORE + '-1', 'file:///kept/main')
+  t.is(await loadKept(args), 'file:///kept/main')
+  t.is(store.calls.keptUrl, 1, 'the copy kind is not asked')
+})
+
+test('copy: a purge during the fetch prevents the keep', async (t) => {
+  const gate = deferred()
+  const { loadKept, store, args, lc } = await copySetup({ fetchBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  lc.dropAuthors(['d4'.repeat(32)])
+  gate.resolve(BYTES)
+  t.is(await pending, 'blob:fresh-image/jpeg')
+  t.is(store.calls.keep, 0)
+})
+
+test('copy: a peek retain during the fetch does not stop the keep', async (t) => {
+  const { retainKept } = await loadKeptMod()
+  const gate = deferred()
+  const { loadKept, store, args, lc } = await copySetup({ fetchBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  retainKept(['peekPosts', 'peekAvatars'], [])
+  gate.resolve(BYTES)
+  t.is(await pending, 'file:///kept/copyAvatars/' + STRANGER + '-' + CORE + '-1')
+  t.is(store.calls.keep, 1)
+})
+
+test('retainKept never hands the copy kinds to the store', async (t) => {
+  const { retainKept } = await loadKeptMod()
+  const before = retained.length
+  retainKept(['copyPosts'], [])
+  retainKept(['copyPosts', 'copyAvatars'], [])
+  t.is(retained.length, before, 'a retain of copy kinds only does not reach the store')
+  retainKept(['peekPosts', 'copyPosts', 'copyAvatars'], [])
+  t.is(retained.length, before + 1)
+  t.alike(retained[retained.length - 1][0], ['peekPosts'], 'the copy kinds are dropped')
+})
+
+test('a denied author\'s main file is not read back', async (t) => {
+  const lc = await loadCaches()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.wipeLocalCaches()
+  const { loadKept, store, fetched, args } = await setup()
+  store.files.set('posts/' + A + '-' + CORE + '-1', 'file:///kept/old')
+  lc.denyAuthors([A])
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'fetched and shown only')
+  t.is(store.calls.keptUrl, 0)
+  t.is(fetched.n, 1)
+})

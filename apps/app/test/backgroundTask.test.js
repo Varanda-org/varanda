@@ -79,6 +79,21 @@ test('the task is defined at module scope and registered for 6 hours', (t) => {
   t.ok(/registerLocalCache\(\{\s*wipe: \(\) => \{\s*forgetLastUse\(\)\s*return unregisterBackgroundRefresh\(\)/.test(src), 'a wipe unregisters')
   t.ok(/if \(gate\.seen\(\)\) return/.test(src), 'a process that was active never runs it')
   t.ok(/await result\.settle/.test(src), 'an unsettled start is waited for')
+  t.ok(/quietLists: \{ load: loadScreenSnapshot, clear: clearScreenSnapshot \}/.test(src), 'the stored lists come from the native store itself')
+  t.ok(/^import \{ clearScreenSnapshot, loadScreenSnapshot \} from '\.\/screenSnapshotStore'$/m.test(read('src/backgroundTask.native.js')), 'imported by the task')
+})
+
+test('the task\'s photo fetch keeps a stranger\'s copy out of the HTTP cache', async (t) => {
+  const src = withoutComments(read('src/backgroundTask.native.js'))
+  t.ok(/fetchMedia\(args\.author, d, \{[^}]*persist: fetchPersist\(persistMode\(args\.persist\), args\.author\)/.test(src), 'persist from the plan\'s mode and the author')
+  t.absent(/persist: true/.test(src), 'never a fixed persist: true')
+  const { fetchPersist, persistMode } = await import('../src/media/keptLoad.js')
+  const { setAllowedAuthors } = await import('../src/localCaches.js')
+  setAllowedAuthors(['aa'.repeat(32)])
+  t.is(fetchPersist(persistMode(true), 'aa'.repeat(32)), true, 'a followed author\'s row photo')
+  t.is(fetchPersist(persistMode('copy'), 'aa'.repeat(32)), true, 'a followed author\'s original')
+  t.is(fetchPersist(persistMode('copy'), 'cc'.repeat(32)), false, 'a stranger\'s original')
+  setAllowedAuthors(null)
 })
 
 test('wipeLocalCaches unregisters the task', async (t) => {

@@ -23,9 +23,15 @@ const denied = new Set()
 // Whether block.list answered in this run (since the last wipe). Until it
 // has, nothing of a stranger may be kept: a blocked author is not denied yet.
 let blocksKnown = false
+// Whether a stored block list (saved by an earlier run of this identity) was
+// adopted since the last wipe. It lets a copy already on disk be read, never
+// a stranger's photo be written: only blocksKnown does that.
+let blocksSeeded = false
 // Bumped by every wipe only (an identity may have changed), unlike the cache
 // generation, which every purge bumps, the deny of a list read included.
 let wipes = 0
+
+const HEX64 = /^[0-9a-f]{64}$/
 
 function keySet (keys) {
   if (keys === null || typeof keys !== 'object' || typeof keys[Symbol.iterator] !== 'function') return null
@@ -77,6 +83,49 @@ export function peekKeepAllowed (key) {
   return !denied.has(k) && !allowed.has(k)
 }
 
+// Called once a stored block list was adopted (its keys denied through
+// denyAuthors). since: the wipeEpoch() read before the list was loaded.
+export function noteBlocksSeeded (since) {
+  if (since !== wipes) return
+  blocksSeeded = true
+}
+
+// keys: authors of a stored block list. Each one already went through
+// dropAuthors in the run that saved it, so nothing is purged and the
+// generation stays: a purge here would drop what screens show on reopen.
+export function denyAuthors (keys) {
+  const set = keySet(keys)
+  if (set !== null) for (const key of set) denied.add(key)
+}
+
+export function deniedAuthor (key) {
+  return typeof key === 'string' && denied.has(key.toLowerCase())
+}
+
+// -> true only for an author inside a known allowed set and not denied.
+export function followedAuthor (key) {
+  if (typeof key !== 'string' || allowed === null) return false
+  const k = key.toLowerCase()
+  return allowed.has(k) && !denied.has(k)
+}
+
+// -> whether a copy-kind photo of `key` already on disk may be read: once a
+// block list is known or adopted in this run, never for a denied author.
+export function copyReadAllowed (key) {
+  if (typeof key !== 'string' || (!blocksKnown && !blocksSeeded)) return false
+  return !denied.has(key.toLowerCase())
+}
+
+// -> whether a private group picture by `author` may be kept: once this
+// run's block list is known, never for a denied author. Follow status does
+// not matter: a group's author is often followed, which peekKeepAllowed
+// refuses.
+export function groupThumbKeepAllowed (author) {
+  if (typeof author !== 'string' || !blocksKnown) return false
+  const k = author.toLowerCase()
+  return HEX64.test(k) && !denied.has(k)
+}
+
 // entry: { wipe, dropAuthors, keepOnlyAuthors }, each optional.
 // -> a function that removes the entry.
 export function registerLocalCache (entry) {
@@ -113,6 +162,7 @@ export function wipeLocalCaches () {
   allowed = null
   denied.clear()
   blocksKnown = false
+  blocksSeeded = false
   wipes++
   forward('wipe')
 }

@@ -14,10 +14,16 @@
 // mutation (bind, wipe, drop, retain) bumps an epoch the moment it is called,
 // and a put or read re-checks it after every await, so a put still in flight
 // never writes back what a later wipe, drop or retain removed, and a read in
-// flight never answers for a binding that has gone.
+// flight never answers for a binding that has gone. A retainThumbs cancels
+// only the puts and reads of the group pictures it deletes.
 //
 // Nothing here throws or rejects: a backend failure answers null or false,
 // and the caller falls back to the network.
+//
+// kinds: which kinds one store holds. The Espiadinha's store holds the peek
+// kinds; the copy store (photos of strangers a reopened screen draws, and
+// decrypted private group pictures under COPY_GROUP_THUMBS) the copy kinds,
+// in its own database with its own caps, so neither evicts the other's rows.
 
 import { validDescriptor } from './fetch.js'
 
@@ -25,6 +31,14 @@ export const PEEK_PHOTO_KINDS = Object.freeze(['peekAvatars', 'peekPosts'])
 export const PEEK_PHOTO_MAX_BYTES = 8388608
 export const PEEK_PHOTO_MAX_FILES = 200
 export const PEEK_PHOTO_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+export const COPY_GROUP_THUMBS = 'copyGroupThumbs'
+export const COPY_PHOTO_KINDS = Object.freeze(['copyAvatars', 'copyPosts', COPY_GROUP_THUMBS])
+export const COPY_PHOTO_MAX_BYTES = 8388608
+export const COPY_PHOTO_MAX_FILES = 200
+export const COPY_PHOTO_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
+export const GROUP_THUMB_MAX_BYTES = 262144
+// The only picture the live draw shows (a 512x512 JPEG).
+const THUMB_MIMES = Object.freeze(['image/jpeg'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -34,11 +48,23 @@ function authorOf (author) {
   return HEX64.test(lower) ? lower : null
 }
 
-export function peekPhotoName (kind, author, d) {
-  if (!PEEK_PHOTO_KINDS.includes(kind)) return null
+function photoName (kinds, kind, author, d) {
+  if (kind === COPY_GROUP_THUMBS || !kinds.includes(kind)) return null
   const a = authorOf(author)
   if (a === null || !validDescriptor(d)) return null
   return kind + '/' + a + '-' + d.core + '-' + d.start + '-' + d.blocks
+}
+
+export function peekPhotoName (kind, author, d) {
+  return photoName(PEEK_PHOTO_KINDS, kind, author, d)
+}
+
+// A decrypted group picture: the image author and the plaintext hash.
+function thumbName (kinds, author, sha) {
+  if (!kinds.includes(COPY_GROUP_THUMBS)) return null
+  const a = authorOf(author)
+  if (a === null || typeof sha !== 'string' || !HEX64.test(sha)) return null
+  return COPY_GROUP_THUMBS + '/' + a + '-' + sha
 }
 
 function asBinding (b) {
@@ -65,14 +91,23 @@ function overlaps (a, b) {
   return a.core === b.core && a.start < b.start + b.blocks && b.start < a.start + a.blocks
 }
 
-function validRow (row) {
+function validRow (row, kinds) {
   if (!row || typeof row !== 'object') return false
-  if (typeof row.name !== 'string' || !PEEK_PHOTO_KINDS.includes(row.kind)) return false
+  if (typeof row.name !== 'string' || !kinds.includes(row.kind)) return false
+  if (row.kind === COPY_GROUP_THUMBS) return validThumbRow(row)
   if (typeof row.author !== 'string' || typeof row.core !== 'string') return false
   if (!Number.isSafeInteger(row.start) || !Number.isSafeInteger(row.blocks)) return false
   if (!Number.isSafeInteger(row.size) || row.size < 0) return false
   if (!Number.isFinite(row.savedAt)) return false
   return row.name === row.kind + '/' + row.author + '-' + row.core + '-' + row.start + '-' + row.blocks
+}
+
+function validThumbRow (row) {
+  if (typeof row.author !== 'string' || typeof row.sha256 !== 'string') return false
+  if (!THUMB_MIMES.includes(row.mime)) return false
+  if (!Number.isSafeInteger(row.size) || row.size < 1 || row.size > GROUP_THUMB_MAX_BYTES) return false
+  if (!Number.isFinite(row.savedAt)) return false
+  return row.name === COPY_GROUP_THUMBS + '/' + row.author + '-' + row.sha256
 }
 
 // Removals remembered before the first bind; past this many the bind clears
@@ -92,8 +127,11 @@ export function createPeekPhotoStore ({
   now = Date.now,
   maxBytes = PEEK_PHOTO_MAX_BYTES,
   maxFiles = PEEK_PHOTO_MAX_FILES,
-  maxAgeMs = PEEK_PHOTO_MAX_AGE_MS
+  maxAgeMs = PEEK_PHOTO_MAX_AGE_MS,
+  kinds = PEEK_PHOTO_KINDS
 } = {}) {
+  const kindList = Array.isArray(kinds) ? kinds.slice() : PEEK_PHOTO_KINDS
+  const valid = (row) => validRow(row, kindList)
   let tail = Promise.resolve()
   let epoch = 0
   // Bumped only by a change of binding and by wipe: a drop or retain called
@@ -117,7 +155,20 @@ export function createPeekPhotoStore ({
     return run
   }
 
-  const live = (at) => at === epoch
+  // epoch -> whether the retainThumbs that bumped to it leaves a name alone
+  // (every name but the group pictures it does not name). A put or read that
+  // only such retains overtook, each sparing its name, still runs: the
+  // retain runs after it in the queue and deletes none of it, so a copy
+  // photo or a named group picture is not lost to a Conversas prune.
+  const spared = new Map()
+  const SPARED_MAX = 64
+  function survives (at, name) {
+    for (let e = at + 1; e <= epoch; e++) {
+      const spares = spared.get(e)
+      if (spares === undefined || !spares(name)) return false
+    }
+    return true
+  }
   const bindLive = (at) => at === bindEpoch
   const tooOld = (row, t) => !(t - row.savedAt <= maxAgeMs && t - row.savedAt >= 0)
 
@@ -155,7 +206,7 @@ export function createPeekPhotoStore ({
         if (!bindLive(at)) return false
       }
       const t = now()
-      const stale = (await rows()).filter((row) => !validRow(row) || tooOld(row, t)).map((row) => row?.name).filter((n) => typeof n === 'string')
+      const stale = (await rows()).filter((row) => !valid(row) || tooOld(row, t)).map((row) => row?.name).filter((n) => typeof n === 'string')
       if (!bindLive(at)) return false
       if (!(await removeNames(stale))) return false
       if (!bindLive(at)) return false
@@ -176,22 +227,22 @@ export function createPeekPhotoStore ({
     }, false)
   }
 
-  function read (kind, author, d) {
-    const name = peekPhotoName(kind, author, d)
+  // matches(row): whether a valid row answers for what the caller asked.
+  function readName (name, matches) {
     const at = epoch
     return enqueue(async () => {
-      if (name === null || ready === null || !live(at)) return null
+      if (name === null || ready === null || !survives(at, name)) return null
       const row = (await rows()).find((r) => r && r.name === name)
-      if (!live(at) || row === undefined) return null
-      const fits = validRow(row) && row.sha256 === d.sha256 && row.size === d.bytes && row.mime === d.mime && !tooOld(row, now())
+      if (!survives(at, name) || row === undefined) return null
+      const fits = valid(row) && matches(row) && !tooOld(row, now())
       if (!fits) {
         await removeNames([name])
         return null
       }
       const bytes = await backend.get(name, readyBinding)
       // Rebound by another tab: not this account's entry to remove.
-      if (!live(at) || bytes === false) return null
-      if (!(bytes instanceof Uint8Array) || bytes.length !== d.bytes) {
+      if (!survives(at, name) || bytes === false) return null
+      if (!(bytes instanceof Uint8Array) || bytes.length !== row.size) {
         await removeNames([name])
         return null
       }
@@ -199,19 +250,29 @@ export function createPeekPhotoStore ({
     }, null)
   }
 
-  function put (kind, author, d, bytes) {
-    const name = peekPhotoName(kind, author, d)
+  function read (kind, author, d) {
+    const name = photoName(kindList, kind, author, d)
+    return readName(name, (row) => row.sha256 === d.sha256 && row.size === d.bytes && row.mime === d.mime)
+  }
+
+  // -> the bytes of a kept group picture, or null.
+  function readThumb (author, sha) {
+    return readName(thumbName(kindList, author, sha), () => true)
+  }
+
+  // rowAt(t): the row to write, saved at t. bytes were checked by the caller.
+  function putName (name, rowAt, bytes) {
     const at = epoch
     return enqueue(async () => {
-      if (name === null || ready === null || !live(at)) return false
-      if (!(bytes instanceof Uint8Array) || bytes.length !== d.bytes || bytes.length > maxBytes) return false
+      if (name === null || ready === null || !survives(at, name)) return false
+      if (bytes.length > maxBytes) return false
       const t = now()
       const others = (await rows()).filter((r) => r && r.name !== name)
-      if (!live(at)) return false
+      if (!survives(at, name)) return false
       const evict = []
       const kept = []
       for (const row of others) {
-        if (!validRow(row) || tooOld(row, t)) {
+        if (!valid(row) || tooOld(row, t)) {
           if (typeof row.name === 'string') evict.push(row.name)
         } else {
           kept.push(row)
@@ -227,13 +288,26 @@ export function createPeekPhotoStore ({
         count--
       }
       if (!(await removeNames(evict))) return false
-      if (!live(at)) return false
-      const a = authorOf(author)
-      const row = { name, kind, author: a, core: d.core, start: d.start, blocks: d.blocks, sha256: d.sha256, mime: d.mime, size: d.bytes, savedAt: t }
+      if (!survives(at, name)) return false
       // The backend checks the stored binding inside its write: another tab
       // may have wiped or rebound the store since this tab's bind.
-      return (await backend.put(row, bytes.slice(), readyBinding)) === true
+      return (await backend.put(rowAt(t), bytes.slice(), readyBinding)) === true
     }, false)
+  }
+
+  function put (kind, author, d, bytes) {
+    const name = photoName(kindList, kind, author, d)
+    if (name === null || !(bytes instanceof Uint8Array) || bytes.length !== d.bytes) return putName(null)
+    const a = authorOf(author)
+    return putName(name, (t) => ({ name, kind, author: a, core: d.core, start: d.start, blocks: d.blocks, sha256: d.sha256, mime: d.mime, size: d.bytes, savedAt: t }), bytes)
+  }
+
+  // Keeps a decrypted group picture (at most GROUP_THUMB_MAX_BYTES).
+  function putThumb (author, sha, bytes, mime) {
+    const name = thumbName(kindList, author, sha)
+    if (name === null || !(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > GROUP_THUMB_MAX_BYTES || !THUMB_MIMES.includes(mime)) return putName(null)
+    const a = authorOf(author)
+    return putName(name, (t) => ({ name, kind: COPY_GROUP_THUMBS, author: a, sha256: sha, mime, size: bytes.length, savedAt: t }), bytes)
   }
 
   function removeWhere (pick) {
@@ -257,6 +331,24 @@ export function createPeekPhotoStore ({
     return removeWhere((row) => set.has(row.author))
   }
 
+  // Deletes the photos of every author `keys` does not name. The rows are
+  // read in the queue, after any bind or wipe queued before, and only while
+  // this binding holds. Never kept for later: the next follow reconcile asks
+  // again, and a later bind may be another member's.
+  function keepOnlyAuthors (keys) {
+    const list = listOf(keys)
+    if (list === null) return Promise.resolve(false)
+    const set = new Set(list.map(authorOf).filter((k) => k !== null))
+    epoch++
+    const at = bindEpoch
+    return enqueue(async () => {
+      if (ready === null || !bindLive(at)) return false
+      const names = (await rows()).filter((row) => row && typeof row.name === 'string' && !set.has(row.author)).map((row) => row.name)
+      if (!bindLive(at)) return false
+      return removeNames(names)
+    }, false)
+  }
+
   function dropRanges (ranges) {
     const given = listOf(ranges)
     if (given === null) return Promise.resolve(false)
@@ -265,16 +357,33 @@ export function createPeekPhotoStore ({
   }
 
   function retain (kinds, entries) {
-    const kindList = listOf(kinds)
+    const kindsAsked = listOf(kinds)
     const entryList = listOf(entries)
-    if (kindList === null || entryList === null) return Promise.resolve(false)
-    const scope = new Set(kindList.filter((k) => PEEK_PHOTO_KINDS.includes(k)))
+    if (kindsAsked === null || entryList === null) return Promise.resolve(false)
+    // Group pictures are pruned only by retainThumbs.
+    const scope = new Set(kindsAsked.filter((k) => k !== COPY_GROUP_THUMBS && kindList.includes(k)))
     const keep = new Set()
     for (const e of entryList) {
-      const name = e && typeof e === 'object' ? peekPhotoName(e.kind, e.author, e.d) : null
+      const name = e && typeof e === 'object' ? photoName(kindList, e.kind, e.author, e.d) : null
       if (name !== null) keep.add(name)
     }
-    return removeWhere((row) => !validRow(row) ? true : scope.has(row.kind) && !keep.has(row.name))
+    return removeWhere((row) => !valid(row) ? true : scope.has(row.kind) && !keep.has(row.name))
+  }
+
+  // Deletes every group picture that pairs ([{ author, sha }]) does not name;
+  // an empty list deletes them all.
+  function retainThumbs (pairs) {
+    const list = listOf(pairs)
+    if (list === null || !kindList.includes(COPY_GROUP_THUMBS)) return Promise.resolve(false)
+    const keep = new Set()
+    for (const p of list) {
+      const name = p && typeof p === 'object' ? thumbName(kindList, p.author, p.sha) : null
+      if (name !== null) keep.add(name)
+    }
+    const run = removeWhere((row) => !valid(row) ? true : row.kind === COPY_GROUP_THUMBS && !keep.has(row.name))
+    spared.set(epoch, (name) => !name.startsWith(COPY_GROUP_THUMBS + '/') || keep.has(name))
+    if (spared.size > SPARED_MAX) spared.delete(spared.keys().next().value)
+    return run
   }
 
   function wipe () {
@@ -286,5 +395,5 @@ export function createPeekPhotoStore ({
     return enqueue(async () => (await backend.clear()) === true, false)
   }
 
-  return { bind, read, put, dropAuthors, dropRanges, retain, wipe }
+  return { bind, read, put, readThumb, putThumb, dropAuthors, keepOnlyAuthors, dropRanges, retain, retainThumbs, wipe }
 }
