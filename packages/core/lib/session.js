@@ -49,6 +49,9 @@ const INTERNAL_MESSAGE = 'erro interno'
 
 const noop = () => {}
 
+// log.read `posts` (docs/rpc.md 5.12): a deleted slot has no type to keep.
+const isPublication = (e) => e.record !== null && typeof e.record === 'object' && (e.record.type === 'post' || e.record.type === 'repost')
+
 // Opt-in thumbnails (docs/rpc.md 5.13): rows carry `thumbs` (a list, or
 // null). Lists are kept newest first (by `at`, later rows first on a tie)
 // only while the whole serialized response, envelope at MAX_ID included,
@@ -1444,12 +1447,19 @@ function createSession ({
     // `before` is an exclusive block-seq bound (docs/rpc.md 5.12); a bound
     // past the length clamps to the newest page. readAll entries are
     // contiguous with seq === index, so the window is a slice.
-    'log.read': serial(async ({ author, limit, before }) => {
+    'log.read': serial(async ({ author, limit, before, posts }) => {
       const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
       const edits = postEdits.editsOf(all)
-      const end = before === undefined ? all.length : Math.min(before, all.length)
-      const window = all.slice(Math.max(0, end - limit), end)
+      // With `posts`, the window and entriesTruncated count publications
+      // only; their seqs are sparse, so the bound is found by seq.
+      const pool = posts === true ? all.filter(isPublication) : all
+      let end = before === undefined ? pool.length : Math.min(before, pool.length)
+      if (posts === true && before !== undefined) {
+        end = pool.length
+        while (end > 0 && pool[end - 1].seq >= before) end--
+      }
+      const window = pool.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
       for (const { seq, record, deleted } of window) {

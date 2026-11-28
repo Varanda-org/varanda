@@ -10,8 +10,12 @@
 //
 // Bodies (an unknown key anywhere fails the whole parse; no cursor is kept):
 // - 'avisos': { notices }: at most 60 notices.list rows (docs/rpc.md 5.28).
-// - 'conversas': { rows, groups }: at most 30 dm.list rows (5.77) and at
-//   most 256 { group, name } of private groups.
+// - 'conversas': { rows, groups, names }: at most 30 dm.list rows (5.77),
+//   at most 256 { group, name } or { group, name, thumb, thumbAuthor } of
+//   private groups (thumb: the plainSha256 of the group picture, never its
+//   key, nonce or core), and at most one { peer, name, username, avatar,
+//   peeked, verifiedAt } per stored row, each kept 14 days from its
+//   verifiedAt. A copy saved before `names` existed parses with names: [].
 // - 'mensagens': { threads: { [peer]: { savedAt, messages } } }: at most 8
 //   dm.thread pages (5.78), 30 messages and 28672 bytes each.
 // - 'grupoMensagens': { groups: { [group]: { savedAt, items } } }: at most 6
@@ -22,6 +26,7 @@
 // or nonce anywhere in those two kinds fails.
 
 import rpc from '@varanda/rpc'
+import { validPrivateGroupImage } from './groupImage.js'
 import { MAX_MEDIA_PER_POST } from './media/plan.js'
 import { MAX_NAME_UNITS, MAX_TEXT_UNITS, avatarField, cardOf, exactKeys, hasOwn, isAt, isHex64, isName, isPlain, isSeq, isUsername } from './snapshotParts.js'
 
@@ -57,6 +62,10 @@ const NOTICE_REQUIRED = ['key', 'seq', 'at', 'name', 'username', 'seen', 'avatar
 const NOTICE_OPTIONAL = ['kind', 'post']
 const DM_ROW_KEYS = ['peer', 'folder', 'preview', 'at', 'unread', 'mine']
 const GROUP_NAME_KEYS = ['group', 'name']
+const GROUP_THUMB_KEYS = ['group', 'name', 'thumb', 'thumbAuthor']
+const PEER_NAME_KEYS = ['peer', 'name', 'username', 'avatar', 'peeked', 'verifiedAt']
+const CONVERSAS_KEYS = ['rows', 'groups', 'names']
+const CONVERSAS_OLD_KEYS = ['rows', 'groups']
 const ENTRY_THREAD_KEYS = ['savedAt', 'messages']
 const ENTRY_GROUP_KEYS = ['savedAt', 'items']
 const MESSAGE_REQUIRED = ['id', 'from', 'text', 'replyTo', 'fwd', 'at', 'mine', 'media', 'card']
@@ -200,16 +209,63 @@ function dmRowOf (v, strict) {
 
 // Building: only a row that says it is a private group (a Conversas group
 // row with `visibility`); a public group's name lives in 'conversasGrupos'.
-function groupNameOf (v, strict) {
+// The picture is kept only as its plainSha256 and the diary that holds it,
+// so a reopen can find a photo already on the device: what decrypts or
+// fetches it never enters the body. `blocked` (building) leaves out a
+// picture whose author is blocked.
+function groupNameOf (v, strict, blocked) {
   if (!isPlain(v)) return null
   if (strict) {
-    if (!exactKeys(v, GROUP_NAME_KEYS) || !isHex64(v.group) || !isName(v.name)) return null
-    return { group: v.group, name: v.name }
+    const thumbed = exactKeys(v, GROUP_THUMB_KEYS)
+    if (!(thumbed || exactKeys(v, GROUP_NAME_KEYS)) || !isHex64(v.group) || !isName(v.name)) return null
+    if (!thumbed) return { group: v.group, name: v.name }
+    if (!isHex64(v.thumb) || !isHex64(v.thumbAuthor)) return null
+    return { group: v.group, name: v.name, thumb: v.thumb, thumbAuthor: v.thumbAuthor }
   }
   if (v.visibility !== 'private' || !isHex64(v.group)) return null
   const label = typeof v.title === 'string' && v.title !== '' ? v.title : v.name
   const name = typeof label === 'string' && label.length <= MAX_NAME_UNITS ? label : null
-  return { group: v.group, name }
+  const out = { group: v.group, name }
+  if (validPrivateGroupImage(v.image) && typeof v.imageAuthor === 'string') {
+    const thumb = v.image.plainSha256
+    const thumbAuthor = v.imageAuthor.toLowerCase()
+    if (isHex64(thumb) && isHex64(thumbAuthor) && blocked instanceof Set && !blocked.has(thumbAuthor)) {
+      Object.assign(out, { thumb, thumbAuthor })
+    }
+  } else if (v.image === undefined && v.imageAuthor === undefined && isHex64(v.thumb) && isHex64(v.thumbAuthor) &&
+    blocked instanceof Set && !blocked.has(v.thumbAuthor)) {
+    // A group rebuilt from the stored copy before a complete group read: its
+    // stored pair stays, or that save would forget every kept picture.
+    Object.assign(out, { thumb: v.thumb, thumbAuthor: v.thumbAuthor })
+  }
+  return out
+}
+
+// A peer's name as the Conversas row showed it. `peeked`: it came from a
+// node-verified peek, not from a profile answer. `verifiedAt`: when a run
+// last verified it; the entry is kept PRIVATE_SNAPSHOT_MAX_AGE_MS from then.
+// An entry with nothing to show is never kept.
+function peerNameOf (v, strict) {
+  if (!isPlain(v) || (strict && !exactKeys(v, PEER_NAME_KEYS))) return null
+  const loose = (x) => (x === undefined && !strict ? null : x)
+  const name = loose(v.name)
+  const username = loose(v.username)
+  if (!isHex64(v.peer) || !isName(name) || !isUsername(username) || typeof v.peeked !== 'boolean') return null
+  if (!Number.isSafeInteger(v.verifiedAt) || v.verifiedAt < 0) return null
+  const avatar = avatarField(v.avatar, strict)
+  if (!avatar.ok) return null
+  if (name === null && username === null && avatar.value === null) return null
+  return { peer: v.peer, name, username, avatar: avatar.value, peeked: v.peeked, verifiedAt: v.verifiedAt }
+}
+
+// input.names as a list of entries: a list, or a Map or an object keyed by
+// peer. A keyed entry naming another peer is left out.
+function nameEntries (src) {
+  if (Array.isArray(src)) return src
+  const pairs = src instanceof Map ? [...src.entries()] : isPlain(src) ? Object.entries(src) : []
+  return pairs
+    .filter(([k, v]) => isPlain(v) && (v.peer === undefined || v.peer === k))
+    .map(([k, v]) => ({ ...v, peer: k }))
 }
 
 function uniqueList (list, max, rowOf, idOf, strict) {
@@ -229,34 +285,73 @@ function uniqueList (list, max, rowOf, idOf, strict) {
 }
 
 // input: { rows (the dm.list rows shown, in order), groups (Conversas group
-// rows with `visibility`), blocked (a list or Set of peers to leave out;
-// without it nothing is built) }.
-// Rows are cut from the end first, then groups, until fits(body).
-function buildConversas (input, { fits } = {}) {
+// rows with `visibility`, and `image`/`imageAuthor` when they have a
+// picture), names (optional: a list, a Map or an object keyed by peer of
+// { peer, name, username, avatar, peeked, verifiedAt }, verifiedAt set only
+// by the run that verified the name), blocked (a list or Set of peers to
+// leave out; without it nothing is built) }.
+// A name is kept only for a stored row, in the order of the rows. Rows are
+// cut from the end first, each taking its name with it, then groups, until
+// fits(body).
+function buildConversas (input, { fits, now } = {}) {
   if (!isPlain(input) || !Array.isArray(input.rows) || !Array.isArray(input.groups) || typeof fits !== 'function' || !iterable(input.blocked)) return null
   const blocked = keySet(input.blocked)
   const shown = input.rows.filter((r) => !(isPlain(r) && blocked.has(r.peer)))
   const rows = uniqueList(shown, CONVERSAS_MAX_ROWS, dmRowOf, (r) => r.peer, false)
-  const groups = uniqueList(input.groups, CONVERSAS_MAX_GROUPS, groupNameOf, (g) => g.group, false)
-  const whole = fitPrefix(rows, (kept) => ({ rows: kept, groups }), fits)
+  const groups = uniqueList(input.groups, CONVERSAS_MAX_GROUPS, (v, strict) => groupNameOf(v, strict, blocked), (g) => g.group, false)
+  const named = new Map()
+  const stored = new Set(rows.map((r) => r.peer))
+  for (const raw of nameEntries(input.names)) {
+    const n = peerNameOf(raw, false)
+    if (n === null || !stored.has(n.peer) || blocked.has(n.peer) || named.has(n.peer) || !fresh(n.verifiedAt, now)) continue
+    named.set(n.peer, n)
+  }
+  const namesOf = (kept) => kept.filter((r) => named.has(r.peer)).map((r) => named.get(r.peer))
+  const whole = fitPrefix(rows, (kept) => ({ rows: kept, groups, names: namesOf(kept) }), fits)
   if (whole !== null) return whole
-  return fitPrefix(groups, (kept) => ({ rows: [], groups: kept }), fits)
+  return fitPrefix(groups, (kept) => ({ rows: [], groups: kept, names: [] }), fits)
 }
 
-function parseConversas (body) {
-  if (!isPlain(body) || !exactKeys(body, ['rows', 'groups'])) return null
+// Strict: a bad name entry, a name for a peer without a row or a repeated
+// peer fails the whole body; a name verified more than
+// PRIVATE_SNAPSHOT_MAX_AGE_MS ago is dropped.
+function parseNames (list, rows, now) {
+  if (!Array.isArray(list) || list.length > CONVERSAS_MAX_ROWS) return null
+  const stored = new Set(rows.map((r) => r.peer))
+  const seen = new Set()
+  const names = []
+  for (const raw of list) {
+    const n = peerNameOf(raw, true)
+    if (n === null || !stored.has(n.peer) || seen.has(n.peer)) return null
+    seen.add(n.peer)
+    if (fresh(n.verifiedAt, now)) names.push(n)
+  }
+  return names
+}
+
+function parseConversas (body, { now } = {}) {
+  if (!isPlain(body)) return null
+  const old = exactKeys(body, CONVERSAS_OLD_KEYS)
+  if (!old && !exactKeys(body, CONVERSAS_KEYS)) return null
   if (!Array.isArray(body.rows) || body.rows.length > CONVERSAS_MAX_ROWS) return null
   if (!Array.isArray(body.groups) || body.groups.length > CONVERSAS_MAX_GROUPS) return null
   const rows = uniqueList(body.rows, CONVERSAS_MAX_ROWS, dmRowOf, (r) => r.peer, true)
   const groups = uniqueList(body.groups, CONVERSAS_MAX_GROUPS, groupNameOf, (g) => g.group, true)
   if (rows === null || groups === null) return null
-  return { rows, groups }
+  const names = old ? [] : parseNames(body.names, rows, now)
+  if (names === null) return null
+  return { rows, groups, names }
 }
 
+// A removed peer's row and name go; a group stays, without its picture when
+// a removed key holds it.
 function withoutAuthorsConversas (body, keys) {
   if (!isPlain(body) || !Array.isArray(body.rows) || !Array.isArray(body.groups)) return null
+  if (body.names !== undefined && !Array.isArray(body.names)) return null
   const drop = keySet(keys)
-  return { rows: body.rows.filter((r) => !drop.has(r.peer)), groups: body.groups }
+  const groups = body.groups.map((g) => (isPlain(g) && drop.has(g.thumbAuthor) ? { group: g.group, name: g.name } : g))
+  const names = (body.names || []).filter((n) => !(isPlain(n) && drop.has(n.peer)))
+  return { rows: body.rows.filter((r) => !drop.has(r.peer)), groups, names }
 }
 
 export const conversasCodec = Object.freeze({

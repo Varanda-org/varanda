@@ -6,6 +6,20 @@
 const test = require('brittle')
 const load = () => import('../src/feedFold.js')
 
+test('ingest reads engagement and originals together only on hosted nodes', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/ARua.js'), 'utf8')
+  const ingest = src.slice(src.indexOf('const ingestNow = useCallback('), src.indexOf('const ingestNowRef'))
+  t.ok(
+    /await firstReads\(\{\s*together: hosted === true,\s*engagement,\s*resolve: first\s*\}\)/.test(ingest) &&
+    /const engagement = async \(\) => \{\s*for \(const chunk of ownKnown \? chunks\(refs, ENGAGEMENT_LIMIT_MAX\) : \[\]\)/.test(ingest) &&
+    /const first = async \(\) => \{\s*(?:if \(mountedRef\.current\) )?await resolve\(firstRefs\)\s*\}/.test(ingest),
+    'the engagement loop and first resolve belong to separate functions joined by hosted capability'
+  )
+  t.ok(/const first = async \(\) => \{\s*if \(mountedRef\.current\) await resolve\(firstRefs\)\s*\}/.test(ingest), 'the first resolve never starts after an unmount')
+})
+
 const ME = 'aa'.repeat(32)
 const B = 'bb'.repeat(32)
 const C = 'cc'.repeat(32)

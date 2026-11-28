@@ -309,3 +309,202 @@ test('a row keeps a valid alt list; a bad one is left out by build and fails the
     t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'parse refuses ' + JSON.stringify(alt))
   }
 })
+
+// A resolved original as useSocial holds it: a post item, no round.
+function orig (author, seq, extra = {}) {
+  const { round: _round, ...rest } = item(author, seq, { name: 'Ana', username: 'ana_1', text: 'original ' + seq })
+  return { ...rest, ...extra }
+}
+const ref = (author, seq) => author + ':' + seq
+const BLOCKED = '12'.repeat(32)
+
+test('a page round-trips with the originals its rows draw, two levels deep', async (t) => {
+  const s = await loadRules()
+  const rows = [
+    repostItem(OTHER, 9, { author: STRANGER, seq: 1 }),
+    item(STRANGER, 8, { quote: { author: OTHER, seq: 2 } }),
+    item(OTHER, 7, { replyTo: { author: STRANGER, seq: 3 } })
+  ]
+  const originals = {
+    [ref(STRANGER, 1)]: orig(STRANGER, 1, { round: 2 }),
+    [ref(OTHER, 2)]: orig(OTHER, 2, { replyTo: { author: FOLLOW, seq: 4 }, avatar: null }),
+    [ref(STRANGER, 3)]: orig(STRANGER, 3),
+    [ref(FOLLOW, 4)]: orig(FOLLOW, 4)
+  }
+  const built = s.buildScreenSnapshot('espiadinha', input(rows, { originals }))
+  t.ok(built)
+  t.alike(Object.keys(built.body), ['rows', 'meta', 'originals'])
+  t.alike(Object.keys(built.body.originals).sort(), [ref(STRANGER, 1), ref(OTHER, 2), ref(STRANGER, 3), ref(FOLLOW, 4)].sort(), 'the second-level parent stays')
+  t.alike(built.body.originals[ref(STRANGER, 1)], orig(STRANGER, 1), 'a live round is not stored on an original')
+  t.is(built.body.originals[ref(OTHER, 2)].avatar, null)
+  t.alike(built.body.originals[ref(STRANGER, 3)].avatar, avatar, 'the avatar is kept')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(built), 'espiadinha', id()), built, 'round trip')
+  const plain = s.buildScreenSnapshot('espiadinha', input(rows))
+  t.alike(Object.keys(plain.body), ['rows', 'meta'], 'no originals, no key: the old shape')
+})
+
+test('an old two-key body parses; any other key or a bad original fails the whole parse', async (t) => {
+  const c = await loadCodec()
+  const rows = [item(STRANGER, 8, { quote: { author: OTHER, seq: 2 } })]
+  const old = { rows, meta: { ...META } }
+  t.alike(c.parse(old), old, 'no version bump: the two-key body still parses')
+  const good = { rows, meta: { ...META }, originals: { [ref(OTHER, 2)]: orig(OTHER, 2) } }
+  t.alike(c.parse(good), good)
+  const bad = (change) => {
+    const copy = JSON.parse(JSON.stringify(good))
+    change(copy)
+    return c.parse(copy)
+  }
+  t.is(bad((b) => { b.extra = 1 }), null, 'an unknown body key')
+  t.is(bad((b) => { b.originals[ref(OTHER, 2)].round = 0 }), null, 'an unknown original key')
+  t.is(bad((b) => { delete b.originals[ref(OTHER, 2)].avatar }), null, 'a missing avatar')
+  t.is(bad((b) => { b.originals[ref(OTHER, 2)].seq = 3 }), null, 'stored under another ref')
+  t.is(bad((b) => { b.originals[ref(OTHER, 2)] = repostItem(OTHER, 2, { author: STRANGER, seq: 1 }) }), null, 'a repost as an original')
+  t.is(bad((b) => { b.originals[ref(OTHER, 2)] = null }), null, 'a null original')
+  t.is(bad((b) => { b.originals[ref(OTHER, 5)] = orig(OTHER, 5) }), null, 'an original no row needs')
+  t.is(bad((b) => { b.originals = {} }), null, 'an empty originals')
+  t.is(bad((b) => { b.originals = [] }), null, 'originals that are not an object')
+  t.is(bad((b) => { b.originals[ref(OTHER, 2)].poll = ['a', 'b'] }), null, 'a poll')
+})
+
+test('build drops orphan, invalid, blocked and missing originals; the rows stay', async (t) => {
+  const c = await loadCodec()
+  const rows = [
+    repostItem(OTHER, 9, { author: STRANGER, seq: 1 }),
+    item(STRANGER, 8, { quote: { author: OTHER, seq: 2 } }),
+    item(OTHER, 7, { replyTo: { author: STRANGER, seq: 3 } }),
+    item(STRANGER, 6, { quote: { author: OTHER, seq: 5 } })
+  ]
+  const originals = {
+    [ref(STRANGER, 1)]: null,
+    [ref(OTHER, 2)]: orig(OTHER, 2, { quote: { author: BLOCKED, seq: 4 } }),
+    [ref(BLOCKED, 4)]: orig(BLOCKED, 4),
+    [ref(STRANGER, 3)]: orig(STRANGER, 3, { text: 5 }),
+    [ref(OTHER, 5)]: orig(OTHER, 6),
+    [ref(OTHER, 99)]: orig(OTHER, 99)
+  }
+  const body = c.build({ rows, meta: META, blocked: [BLOCKED], followed: [], originals }, { fits: () => true })
+  t.is(body.rows.length, 4, 'every row stays')
+  t.alike(Object.keys(body.originals), [ref(OTHER, 2)], 'null, blocked, invalid, misfiled and orphan originals are left out')
+  t.ok(c.parse(JSON.parse(JSON.stringify(body))))
+  const none = c.build({ rows, meta: META, blocked: [], followed: [], originals: { [ref(OTHER, 99)]: orig(OTHER, 99) } }, { fits: () => true })
+  t.alike(Object.keys(none), ['rows', 'meta'], 'only orphans: no originals key')
+})
+
+test('the byte cut drops the last row together with the originals only it needs', async (t) => {
+  const c = await loadCodec()
+  const rows = [
+    item(STRANGER, 9, { quote: { author: OTHER, seq: 1 } }),
+    item(STRANGER, 8, { quote: { author: OTHER, seq: 2 } }),
+    repostItem(FOLLOW, 7, { author: OTHER, seq: 1 })
+  ]
+  const big = (seq) => orig(OTHER, seq, { text: 'x'.repeat(1000) })
+  const originals = { [ref(OTHER, 1)]: big(1), [ref(OTHER, 2)]: big(2) }
+  const all = c.build({ rows, meta: META, blocked: [], followed: [], originals }, { fits: () => true })
+  const limit = utf8(all) - 1
+  const cut = c.build({ rows, meta: META, blocked: [], followed: [], originals }, { fits: (b) => utf8(b) <= limit })
+  t.alike(cut.rows.map((r) => r.seq), [9, 8], 'the last row is cut')
+  t.alike(Object.keys(cut.originals).sort(), [ref(OTHER, 1), ref(OTHER, 2)].sort(), 'a shared original stays')
+  const twoLimit = utf8({ rows: rows.slice(0, 1), meta: META, originals: { [ref(OTHER, 1)]: big(1) } })
+  const one = c.build({ rows, meta: META, blocked: [], followed: [], originals }, { fits: (b) => utf8(b) <= twoLimit })
+  t.alike(one.rows.map((r) => r.seq), [9])
+  t.alike(Object.keys(one.originals), [ref(OTHER, 1)], 'the cut row\'s original goes with it')
+})
+
+test('a block drops originals by that author and orphans; a follow drops orphans', async (t) => {
+  const s = await loadRules()
+  const rows = [
+    item(STRANGER, 9, { quote: { author: OTHER, seq: 2 } }),
+    repostItem(OTHER, 8, { author: STRANGER, seq: 1 })
+  ]
+  const originals = {
+    [ref(OTHER, 2)]: orig(OTHER, 2, { replyTo: { author: FOLLOW, seq: 7 } }),
+    [ref(FOLLOW, 7)]: orig(FOLLOW, 7),
+    [ref(STRANGER, 1)]: orig(STRANGER, 1)
+  }
+  const built = s.buildScreenSnapshot('espiadinha', input(rows, { originals }))
+  t.is(Object.keys(built.body.originals).length, 3)
+  const noFollow = s.screenWithoutAuthors(built, [FOLLOW])
+  t.is(noFollow.body.rows.length, 2, 'no row names the blocked author at first level')
+  t.alike(Object.keys(noFollow.body.originals).sort(), [ref(OTHER, 2), ref(STRANGER, 1)].sort(), 'the blocked author\'s original goes')
+  t.ok(s.parseScreenSnapshot(JSON.stringify(noFollow), 'espiadinha', id()))
+  const noStranger = s.screenWithoutAuthors(built, [STRANGER])
+  t.alike(noStranger.body.rows, [])
+  t.alike(Object.keys(noStranger.body), ['rows', 'meta'], 'orphans go with their rows')
+  t.ok(s.parseScreenSnapshot(JSON.stringify(noStranger), 'espiadinha', id()))
+  const followed = s.screenKeepOnlyAuthors(built, new Set([OWN, STRANGER]))
+  t.alike(followed.body.rows.map((r) => r.seq), [8])
+  t.alike(Object.keys(followed.body.originals), [ref(STRANGER, 1)], 'the followed poster\'s originals go; the one a stranger reposts stays')
+  t.ok(s.parseScreenSnapshot(JSON.stringify(followed), 'espiadinha', id()))
+})
+
+test('peekSeedOf gives useSocial the stored originals as ref pairs', async (t) => {
+  const c = await loadCodec()
+  const rows = [item(STRANGER, 9, { quote: { author: OTHER, seq: 2 } })]
+  const body = c.parse({ rows, meta: { ...META }, originals: { [ref(OTHER, 2)]: orig(OTHER, 2) } })
+  const seed = c.peekSeedOf(body)
+  t.alike([...seed.originals], [[ref(OTHER, 2), orig(OTHER, 2)]])
+  t.ok(seed.counts instanceof Map)
+  t.is(seed.counts.size, 0)
+  t.alike([...seed.liked], [])
+  t.alike([...seed.reposted], [])
+  t.alike([...c.peekSeedOf({ rows, meta: META }).originals], [], 'an old body seeds nothing')
+  t.is(c.peekSeedOf(null), null)
+})
+
+test('an own deletion drops the own originals from the stored copy; the rows stay', async (t) => {
+  const s = await loadRules()
+  const { dropOwnOriginals } = await loadCodec()
+  const caches = await import('../src/localCaches.js')
+  const texts = new Map()
+  const raw = { load: (k) => (texts.has(k) ? texts.get(k) : null), save: (k, v) => texts.set(k, v), clear: (k) => texts.delete(k) }
+  const store = s.createScreenSnapshotStore(raw)
+  const api = { loadText: raw.load, load: store.loadScreenSnapshot, save: store.saveScreenSnapshot, clear: store.clearScreenSnapshot }
+  const rows = [repostItem(STRANGER, 9, { author: OWN, seq: 4 }), item(STRANGER, 8, { quote: { author: OTHER, seq: 2 } })]
+  const originals = { [ref(OWN, 4)]: orig(OWN, 4), [ref(OTHER, 2)]: orig(OTHER, 2) }
+  const now = Date.now()
+  const built = s.buildScreenSnapshot('espiadinha', input(rows, { originals, now }))
+  t.alike(Object.keys(built.body.originals).sort(), [ref(OWN, 4), ref(OTHER, 2)].sort(), 'an own original is stored')
+  t.ok(store.saveScreenSnapshot('espiadinha', built, caches.cacheGeneration()))
+  dropOwnOriginals(api, caches.cacheGeneration())
+  const after = store.loadScreenSnapshot('espiadinha', id({ now }))
+  t.ok(after, 'still stored')
+  t.alike(after.body.rows, built.body.rows, 'every row stays')
+  t.alike(Object.keys(after.body.originals), [ref(OTHER, 2)], 'only the own original goes')
+  t.is(after.savedAt, built.savedAt, 'its age is kept')
+  const text = raw.load('espiadinha')
+  dropOwnOriginals(api, caches.cacheGeneration())
+  t.is(raw.load('espiadinha'), text, 'nothing own left: not written again')
+  const onlyOwn = s.buildScreenSnapshot('espiadinha', input([rows[0]], { originals, now }))
+  t.ok(store.saveScreenSnapshot('espiadinha', onlyOwn, caches.cacheGeneration()))
+  dropOwnOriginals(api, caches.cacheGeneration())
+  const bare = store.loadScreenSnapshot('espiadinha', id({ now }))
+  t.alike(Object.keys(bare.body), ['rows', 'meta'], 'no original left: the two-key body')
+  t.alike(bare.body.rows, onlyOwn.body.rows)
+})
+
+test('the own-originals purge fails closed: a copy it cannot parse or write goes', async (t) => {
+  const s = await loadRules()
+  const { dropOwnOriginals } = await loadCodec()
+  const caches = await import('../src/localCaches.js')
+  const texts = new Map()
+  const raw = { load: (k) => (texts.has(k) ? texts.get(k) : null), save: (k, v) => texts.set(k, v), clear: (k) => texts.delete(k) }
+  const store = s.createScreenSnapshotStore(raw)
+  const api = { loadText: raw.load, load: store.loadScreenSnapshot, save: store.saveScreenSnapshot, clear: store.clearScreenSnapshot }
+  texts.set('espiadinha', '{not json')
+  dropOwnOriginals(api, caches.cacheGeneration())
+  t.is(raw.load('espiadinha'), null, 'a text that does not parse goes')
+  texts.set('espiadinha', JSON.stringify({ v: 1, kind: 'espiadinha', origin: ORIGIN, association: ASSOC, owner: OWN, savedAt: Date.now(), body: { rows: [], meta: { ...META }, extra: 1 } }))
+  dropOwnOriginals(api, caches.cacheGeneration())
+  t.is(raw.load('espiadinha'), null, 'a body the strict parse refuses goes')
+  const rows = [repostItem(STRANGER, 9, { author: OWN, seq: 4 })]
+  const built = s.buildScreenSnapshot('espiadinha', input(rows, { originals: { [ref(OWN, 4)]: orig(OWN, 4) }, now: Date.now() }))
+  t.ok(store.saveScreenSnapshot('espiadinha', built, caches.cacheGeneration()))
+  dropOwnOriginals(api, caches.cacheGeneration() - 1)
+  t.is(raw.load('espiadinha'), null, 'a refused write (a stale generation) clears the copy')
+  t.is(dropOwnOriginals(api, caches.cacheGeneration()), undefined, 'no copy: nothing to do')
+  t.ok(store.saveScreenSnapshot('espiadinha', built, caches.cacheGeneration()))
+  const failing = s.createScreenSnapshotStore({ load: raw.load, save: () => {}, clear: raw.clear })
+  dropOwnOriginals({ loadText: raw.load, load: failing.loadScreenSnapshot, save: failing.saveScreenSnapshot, clear: failing.clearScreenSnapshot }, caches.cacheGeneration())
+  t.is(raw.load('espiadinha'), null, 'a write the raw store swallowed (save still true) clears the copy')
+})

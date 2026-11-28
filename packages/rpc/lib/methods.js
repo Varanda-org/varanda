@@ -1398,7 +1398,9 @@ const SPECS = {
       author: opt(isKey),
       limit: opt(int(1, L.LOG_LIMIT_MAX), L.LOG_LIMIT_DEFAULT),
       // Exclusive block-seq bound; absent = the newest page.
-      before: opt(int(1, Number.MAX_SAFE_INTEGER))
+      before: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      // Pages publications only (post and repost records).
+      posts: opt(isBool)
     }
   },
   // Own-data export pages (docs/rpc.md 5.180). 'head' takes no cursor; the

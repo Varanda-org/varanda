@@ -992,10 +992,12 @@ export function createVitrineRequest (fixtures, options) {
     'follow.add': ({ key }) => changeFollow(key, true),
     'follow.remove': ({ key }) => changeFollow(key, false),
     'follow.list': ({ offset, limit }) => ({ follows: data.follows.slice(offset, offset + limit), total: data.follows.length }),
-    'log.read': ({ author = data.own, limit, before }) => {
+    'log.read': ({ author = data.own, limit, before, posts }) => {
       const all = logs.get(author)
       if (!all) refuse('NOT_FOUND', 'sem dados locais para este diário')
-      const candidates = all.filter((e) => before === undefined || e.seq < before)
+      // `posts` as the nodes: a deleted slot has no type, so it is left out.
+      const publication = (e) => !deleted.has(`${author}:${e.seq}`) && (e.record.type === 'post' || e.record.type === 'repost')
+      const candidates = all.filter((e) => (before === undefined || e.seq < before) && (posts !== true || publication(e)))
       const page = candidates.slice(-limit)
       const entries = page.filter((e) => !deleted.has(`${author}:${e.seq}`)).map((e) => {
         const edit = postEdits.get(`${author}:${e.seq}`)

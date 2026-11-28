@@ -114,7 +114,7 @@ test('names.js keeps a verified peek through a missing answer', async (t) => {
   const path = require('path')
   const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
   for (const piece of [
-    'missingEntry(peekedRef.current.get(key))',
+    'missingAnswer(peekedRef.current, savedRef.current, key, deniedAuthor)',
     'peekedRef.current.delete(key)',
     'peekedRef.current.clear()',
     'heldRef.current.add(key)',
@@ -127,6 +127,219 @@ test('names.js keeps a verified peek through a missing answer', async (t) => {
   const body = src.slice(start, src.indexOf('}, [commit])', start))
   t.ok(start > 0 && body.includes('peekReplaces(known, had, unsupportedRef.current)'), 'learnVerified writes by the shared rule')
   t.ok(body.includes('pageHintFields({}, known)'), 'learnVerified keeps the replaced page hints')
+})
+
+test('missing keeps a saved peek', async (t) => {
+  const { missingAnswer, savedPeeks, absentSeeds, applySeed } = await load()
+  const K = 'ab'.repeat(32)
+  const none = new Map()
+  t.is(missingAnswer(none, none, K), null, 'base: nothing kept, the row shows unnamed')
+  const [[, seed]] = absentSeeds(new Map(), [[K, { name: 'Ana', username: 'ana', avatar: AV }]])
+  t.is(applySeed(null, seed).name, 'Ana', 'seedMany names the row')
+  t.is(missingAnswer(none, none, K), null, 'and a missing answer loses that name')
+  const saved = new Map(savedPeeks(new Map(), none, [[K.toUpperCase(), { name: 'Ana', username: 'ana', avatar: AV }]]))
+  t.alike(missingAnswer(none, saved, K), { name: 'Ana', username: 'ana', bio: null, avatar: AV, loaded: true }, 'a saved peek stays through missing')
+  t.not(missingAnswer(none, saved, K), saved.get(K), 'as a copy')
+  const peeked = new Map([[K, { name: 'Ana B', username: 'anab', bio: null, avatar: null, loaded: true }]])
+  t.is(missingAnswer(peeked, saved, K).name, 'Ana B', "this run's peek wins over the saved one")
+  t.is(missingAnswer(none, saved, K, (k) => k === K), null, 'never for a denied author')
+})
+
+test('savedPeeks remembers only keys the cache and this run do not hold', async (t) => {
+  const { savedPeeks, savedSeed, applySeed } = await load()
+  const A = 'ab'.repeat(32)
+  const B = 'cd'.repeat(32)
+  const C = 'ef'.repeat(32)
+  const D = '12'.repeat(32)
+  const E = '34'.repeat(32)
+  const known = new Map([[A, { name: 'Ana nova', username: 'ana', bio: null, avatar: null, loaded: true }]])
+  const peeked = new Map([[B, { name: 'Bia', username: null, bio: null, avatar: null, loaded: true }]])
+  const out = savedPeeks(known, peeked, [
+    [A, { name: 'Ana velha' }],
+    [B, { name: 'Bia velha' }],
+    [C.toUpperCase(), { name: 'Caio', username: 'caio', avatar: AV }],
+    [C, { name: 'Caio de novo' }],
+    [D, { name: '', username: '' }],
+    [E, { name: 'Eva' }],
+    [null, { name: 'x' }],
+    'bad'
+  ], (k) => k === E)
+  t.alike(out, [[C, { name: 'Caio', username: 'caio', bio: null, avatar: AV, loaded: true }]], 'a held, a peeked, a repeated, a nameless and a denied key are left out')
+  t.alike(savedPeeks(new Map([[A, null]]), new Map(), [[A, { name: 'Ana' }]]).map(([k]) => k), [A], 'the null of a missing answer does not block it')
+  t.alike(savedPeeks(null, peeked, null), [])
+  const seed = applySeed(null, savedSeed(out[0][1]))
+  t.alike(seed, { name: 'Caio', username: 'caio', bio: null, avatar: AV, loaded: false }, 'applied as a seed: not loaded, so profile.read is still asked')
+})
+
+const SAVED_A = 'ab'.repeat(32)
+const SAVED_B = 'cd'.repeat(32)
+const SAVED_C = 'ef'.repeat(32)
+
+function savedRun (over = {}) {
+  return {
+    known: new Map(),
+    peeked: new Map(),
+    held: new Set(),
+    saved: new Map(),
+    refused: () => false,
+    max: 500,
+    hintOf: () => null,
+    ...over
+  }
+}
+
+test('seedSaved: a missing answer before the saved peek keeps the name, as after it', async (t) => {
+  const { seedSaved, missingAnswer, applySeed, isSavedPeekKey } = await load()
+  const stored = [[SAVED_A, { name: 'Ana', username: 'ana', avatar: AV }]]
+  const kept = { name: 'Ana', username: 'ana', bio: null, avatar: AV, loaded: true }
+  // Seed first, then missing.
+  const one = savedRun()
+  const first = seedSaved({ ...one, entries: stored })
+  t.is(first.next, null, 'an absent key changes nothing but the seeds')
+  t.is(first.seeds.length, 1)
+  one.known.set(SAVED_A, applySeed(null, first.seeds[0][1]))
+  const seededThenMissing = missingAnswer(one.peeked, one.saved, SAVED_A)
+  // Missing first, then seed.
+  const two = savedRun({ known: new Map([[SAVED_A, null]]) })
+  const out = seedSaved({ ...two, entries: stored })
+  t.alike(out.seeds, [], 'not a seed: the answer is in')
+  t.alike(out.next.get(SAVED_A), kept, 'the entry the missing answer would have left')
+  t.alike(out.next.get(SAVED_A), seededThenMissing, 'both orders agree')
+  t.is(isSavedPeekKey(two.saved, two.peeked, SAVED_A), true, 'still owed a peek')
+  t.is(two.known.get(SAVED_A), null, 'the cache passed in stays as it was')
+})
+
+test('seedSaved: a present entry and a denied author still block the saved peek', async (t) => {
+  const { seedSaved } = await load()
+  const profile = { name: 'Ana nova', username: 'ana', bio: null, avatar: null, loaded: true }
+  const seed = { name: 'Bia', username: null, bio: null, avatar: undefined, loaded: false }
+  const run = savedRun({ known: new Map([[SAVED_A, profile], [SAVED_B, seed], [SAVED_C, null]]), refused: (k) => k === SAVED_C })
+  const out = seedSaved({ ...run, entries: [[SAVED_A, { name: 'Ana velha' }], [SAVED_B, { name: 'Bia velha' }], [SAVED_C, { name: 'Caio' }]] })
+  t.alike(out, { seeds: [], next: null }, 'a profile answer, a loaded seed and a denied missing key are left alone')
+  t.is(run.saved.size, 0, 'none is remembered')
+  const peeked = savedRun({ known: new Map([[SAVED_A, null]]), peeked: new Map([[SAVED_A, { ...profile, name: 'Ana B' }]]) })
+  t.alike(seedSaved({ ...peeked, entries: [[SAVED_A, { name: 'Ana velha' }]] }), { seeds: [], next: null }, "this run's peek holds it")
+})
+
+test('seedSaved: past the cap no evicted saved name stays', async (t) => {
+  const { seedSaved, applySeed, savedSeed, peekedEntry, missingEntry } = await load()
+  const key = (n) => n.toString(16).padStart(4, '0').repeat(16)
+  const profile = { name: 'Perfil', username: null, bio: null, avatar: null, loaded: true }
+  const saved = new Map([
+    [key(1), peekedEntry({ name: 'Um' })],
+    [key(2), peekedEntry({ name: 'Dois' })],
+    [key(3), peekedEntry({ name: 'Tres' })],
+    [key(4), peekedEntry({ name: 'Quatro' })]
+  ])
+  const known = new Map([
+    [key(1), applySeed(null, savedSeed(saved.get(key(1))))],
+    [key(2), missingEntry(saved.get(key(2)))],
+    [key(3), profile],
+    [key(4), { ...applySeed(null, savedSeed(saved.get(key(4)))), page: true, closed: false, moved: false }]
+  ])
+  const run = savedRun({ known, saved, max: 5, hintOf: (e) => (e && e.page === true ? { page: true, closed: false, moved: false } : null) })
+  const entries = [5, 6, 7, 8].map((n) => [key(n), { name: 'Novo ' + n }])
+  // 4 old + 4 new, cap 5: the three oldest leave.
+  const out = seedSaved({ ...run, entries })
+  t.alike([...run.saved.keys()], [key(4), key(5), key(6), key(7), key(8)])
+  t.is(out.next.has(key(1)), false, 'an unanswered saved seed goes back to unknown, so profile.read still asks')
+  t.is(out.next.get(key(2)), null, 'a saved name a missing answer kept is forgotten')
+  t.is(out.next.get(key(3)), profile, 'an entry a profile answer set is untouched')
+  t.alike(out.seeds.map(([k]) => k), [key(5), key(6), key(7), key(8)])
+
+  const big = savedRun({ max: 2 })
+  const many = seedSaved({ ...big, entries: [1, 2, 3].map((n) => [key(n), { name: 'N' + n }]) })
+  t.alike(many.seeds.map(([k]) => k), [key(2), key(3)], 'a key evicted in the same call is not shown')
+  t.is(many.next, null)
+  const missingBig = savedRun({ max: 1, known: new Map([[key(1), null], [key(2), null]]) })
+  const late = seedSaved({ ...missingBig, entries: [[key(1), { name: 'N1' }], [key(2), { name: 'N2' }]] })
+  t.is(late.next.get(key(1)), null, 'nor kept through a missing answer')
+  t.is(late.next.get(key(2)).name, 'N2')
+
+  const held = savedRun({
+    max: 1,
+    saved: new Map([[key(1), peekedEntry({ name: 'Um' })]]),
+    known: new Map([[key(1), applySeed(null, savedSeed(peekedEntry({ name: 'Um' })))]]),
+    held: new Set([key(1)])
+  })
+  t.is(seedSaved({ ...held, entries: [[key(2), { name: 'Dois' }]] }).next, null, 'a key a profile answer holds is never touched')
+  const mixed = savedRun({
+    max: 1,
+    saved: new Map([[key(1), peekedEntry({ name: 'Um' })]]),
+    known: new Map([[key(1), { name: 'Outro', username: null, bio: null, avatar: undefined, loaded: false }]])
+  })
+  t.is(seedSaved({ ...mixed, entries: [[key(2), { name: 'Dois' }]] }).next, null, 'an entry another seed changed since is not the saved one')
+})
+
+test('sameOwner: a stored copy seeds only the identity it was saved for', async (t) => {
+  const { sameOwner } = await load()
+  t.is(sameOwner(SAVED_A, SAVED_A), true, 'the current owner seeds')
+  t.is(sameOwner(SAVED_A.toUpperCase(), SAVED_A), true, 'any case')
+  t.is(sameOwner(SAVED_B, SAVED_A), false, 'another owner changes nothing')
+  t.is(sameOwner(null, SAVED_A), false, 'no owner changes nothing')
+  t.is(sameOwner(undefined, SAVED_A), false)
+  t.is(sameOwner(SAVED_A, null), false, 'nor with no identity')
+  t.is(sameOwner('', ''), false)
+})
+
+test('isSavedPeekKey: a saved peek this run has not verified again', async (t) => {
+  const { isSavedPeekKey } = await load()
+  const A = 'ab'.repeat(32)
+  const B = 'cd'.repeat(32)
+  const saved = new Map([[A, { name: 'Ana' }], [B, { name: 'Bia' }]])
+  const peeked = new Map([[B, { name: 'Bia' }]])
+  t.is(isSavedPeekKey(saved, peeked, A), true)
+  t.is(isSavedPeekKey(saved, peeked, A.toUpperCase()), true, 'any case')
+  t.is(isSavedPeekKey(saved, peeked, B), false, 'verified again in this run')
+  t.is(isSavedPeekKey(saved, peeked, 'ef'.repeat(32)), false, 'never saved')
+  t.is(isSavedPeekKey(saved, peeked, null), false)
+})
+
+test('savedRebuild starts a new scope with the saved peeks as seeds, never a denied one', async (t) => {
+  const { savedRebuild } = await load()
+  const A = 'ab'.repeat(32)
+  const B = 'cd'.repeat(32)
+  const saved = new Map([[A, { name: 'Ana', username: 'ana', bio: null, avatar: AV, loaded: true }], [B, { name: 'Bia', username: null, bio: null, avatar: null, loaded: true }]])
+  const out = savedRebuild(saved, (k) => k === B)
+  t.alike([...out.keys()], [A])
+  t.alike(out.get(A), { name: 'Ana', username: 'ana', bio: null, avatar: AV, loaded: false }, 'a seed: the re-ask still reads it')
+  t.is(savedRebuild(new Map()).size, 0)
+  t.is(saved.size, 2, 'the saved peeks themselves stay')
+})
+
+test('names.js keeps saved peeks by the shared rules', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  const between = (from, to) => {
+    const start = src.indexOf(from)
+    return start < 0 ? '' : src.slice(start, src.indexOf(to, start))
+  }
+  const seed = between('const seedPeeked = useCallback(', '}, [apply, commit])')
+  t.ok(seed.includes('const { seeds, next } = seedSaved({') && seed.includes('refused: deniedAuthor') && seed.includes('max: MAX_REASK_KEYS'), 'seedPeeked: by the shared rule, never a denied author')
+  t.ok(seed.includes('held: heldRef.current') && seed.includes('peeked: peekedRef.current') && seed.includes('hintOf: (known) => pageHintFields({}, known)'), 'with this run\'s answers and the page hints')
+  t.ok(seed.includes('isKey(pair[0])'), 'only valid keys are saved')
+  t.ok(seed.includes('if (next !== null) commit(next)') && seed.includes('apply(seeds)'), 'missing keys and evictions written, absent keys applied as seeds')
+  const guard = seed.indexOf('if (!sameOwner(owner, ownKeyRef.current)) return')
+  t.ok(guard > 0 && guard < seed.indexOf('seedSaved('), 'a copy saved for another identity, or none, is dropped first, against the current own key')
+  t.ok(src.includes('isSavedPeekKey(savedRef.current, peekedRef.current, key)'), 'isSavedPeek reads the refs')
+  const learn = between('const learnVerified = useCallback(', '}, [commit])')
+  t.ok(learn.includes('const had = peeked.has(key) || savedRef.current.has(key)'), "this run's peek replaces a saved one, even after missing kept it")
+  t.ok(learn.indexOf('savedRef.current.delete(key)') > learn.indexOf('if (entry === null || heldRef.current.has(key)) continue'), 'only an accepted peek drops it')
+  const forget = between('const forgetVerified = useCallback(', '}, [commit])')
+  t.ok(forget.indexOf('savedRef.current.delete(key)') > 0 && forget.indexOf('savedRef.current.delete(key)') < forget.indexOf('if (heldRef.current.has(key)) continue'), 'a gone diary drops the saved name')
+  const flush = between('flushRef.current = async', 'const schedulePeek = useCallback(')
+  t.ok(flush.includes('missingAnswer(peekedRef.current, savedRef.current, key, deniedAuthor)'), 'missing keeps a saved peek')
+  t.ok(flush.indexOf('savedRef.current.delete(key)') > flush.indexOf('const settled = settleProfile('), 'a profile answer drops it')
+  const owner = between('useEffect(() => {\n    if (savedOwnerRef.current === ownKey) return', '}, [ownKey])')
+  t.ok(owner.includes('savedRef.current.clear()'), 'another identity forgets the saved peeks')
+  const epoch = between('const keys = new Set([...cacheRef.current.keys(), ...frontRef.current])', '}, [epoch, generation, schedule])')
+  t.ok(src.indexOf('if (savedOwnerRef.current === ownKey) return') < src.indexOf('}, [epoch, generation, schedule])'), 'the identity check runs before the rebuild')
+  t.ok(epoch.includes('cacheRef.current = savedRebuild(savedRef.current, deniedAuthor)'), 'a new scope writes the saved peeks back')
+  t.absent(epoch.includes('savedRef.current.clear()'), 'a new epoch or generation keeps them')
+  t.is(src.split('savedRef.current.clear()').length - 1, 1, 'cleared only on an identity change')
+  const line = src.split('\n').find((l) => l.includes('const value = useMemo('))
+  t.ok(line && line.includes('seedPeeked') && line.includes('isSavedPeek'), 'both are in the context value')
 })
 
 test('peekReplaces lets a peek replace a missing answer, a seed or an earlier peek, never a profile', async (t) => {

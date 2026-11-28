@@ -66,10 +66,12 @@ import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin, rpIdOf } from './src/installation'
 import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
-import { loadScreenSnapshotText } from './src/screenSnapshotStore'
+import { clearScreenSnapshot, loadScreenSnapshot, loadScreenSnapshotText, saveScreenSnapshot } from './src/screenSnapshotStore'
+import { dropOwnOriginals } from './src/peekSnapshot'
 import { parseScreenSnapshot } from './src/screenSnapshot'
 import { sessionStore } from './src/sessionStore'
-import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
+import { cacheGeneration, wipeEpoch, wipeLocalCaches } from './src/localCaches'
+import { publishBootLists, setQuietListsMayStore } from './src/quietLists'
 import { bindPeek } from './src/media/keep'
 import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
@@ -445,6 +447,20 @@ function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
 }
 
+// The own block and mute lists for the cold-start preview, read as the
+// 'momentos' copy is (without the store's clear-on-refusal), or null unless
+// both parse. Without them the preview still shows, and other people's rows
+// wait as before.
+function readQuietLists (opts) {
+  try {
+    const blocks = parseScreenSnapshot(loadScreenSnapshotText('bloqueios'), 'bloqueios', opts)
+    const mutes = parseScreenSnapshot(loadScreenSnapshotText('silenciados'), 'silenciados', opts)
+    return blocks !== null && mutes !== null ? { blocks: blocks.body.keys, mutes: mutes.body.keys } : null
+  } catch {
+    return null
+  }
+}
+
 function Member () {
   const styles = useStyles(makeStyles)
   const { scheme, colors } = useTheme()
@@ -546,10 +562,12 @@ function Member () {
   // hold the deleted post, and it must not show again at the next launch
   // even if A Rua is not visited before the app closes. A Rua may still hold
   // it in memory: noteDeleted drops an armed write (cache generation) and
-  // none is made until a first page read that starts after this delete.
+  // none is made until a first page read that starts after this delete. The
+  // Espiadinha's stored page loses the own originals the same way.
   const deletedPost = useCallback(() => {
     noteDeleted()
     clearSnapshot()
+    dropOwnOriginals({ loadText: loadScreenSnapshotText, load: loadScreenSnapshot, save: saveScreenSnapshot, clear: clearScreenSnapshot }, cacheGeneration())
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
@@ -701,6 +719,7 @@ function Member () {
       }
       let snapshot = null
       let moments = null
+      let quiet = null
       let rpId = null
       try {
         snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
@@ -708,6 +727,7 @@ function Member () {
         // Read without the store's clear-on-refusal: the binding is not
         // proven yet, and the live screen may still accept this copy.
         if (snapshot !== null && snapshot.items.length > 0) moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })
+        if (moments !== null) quiet = readQuietLists({ ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })
         rpId = rpIdOf(installationOrigin())
       } catch {
         settled = true
@@ -737,6 +757,9 @@ function Member () {
           previewAsked.current = false
           return
         }
+        // snapshot.owner is lowercase hex (parseSnapshot), as liveBinding's
+        // owner, which the providers compare it with exactly.
+        if (quiet !== null) publishBootLists({ owner: snapshot.owner, origin: binding.origin, association: binding.association, blocks: quiet.blocks, mutes: quiet.mutes, wipe: wipeEpoch() })
         setPreviewSeed({ snapshot, moments, sessionLive: true, gen, origin: binding.origin, association: binding.association })
       })
     }).catch(() => { settled = true })
@@ -1006,6 +1029,12 @@ function Member () {
   // without an identity) and asks as soon as one appears that is not in the
   // record.
   const termsOk = decision === 'accepted' || decision === 'bind'
+  // The stored block and mute lists are member data: saved only past the
+  // Terms and unlocked (see above).
+  useEffect(() => {
+    setQuietListsMayStore(termsOk && !locked)
+    return () => setQuietListsMayStore(false)
+  }, [termsOk, locked])
   // The enrolment left due by the status read above: one attempt per answer
   // (consumed here, even when one is already in flight), never retried.
   useEffect(() => {
@@ -4906,8 +4935,8 @@ export default function App () {
       <ThemeProvider>
         <NodeProvider>
           <NamesProvider>
-            <BlocksProvider>
-              <MutesProvider>
+            <BlocksProvider bindingOf={liveBinding}>
+              <MutesProvider bindingOf={liveBinding}>
                 <OutboxProvider>
                   <Member />
                 </OutboxProvider>

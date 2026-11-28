@@ -172,8 +172,15 @@ test('the snapshot reports page and details and seeds names while Momentos still
   t.ok(effect.includes("onBoot('page')") && effect.includes("onBoot('details')"))
   t.absent(effect.includes("onBoot('moments')"))
   t.ok(effect.includes("perfMarks().mark('rows-snapshot')"))
-  t.ok(effect.includes('seedMany(Object.entries(snapshot.names))'), 'seeds only for authors not known yet')
-  t.absent(effect.includes('learnMany('), 'never learnMany: it would overwrite a newer entry')
+  t.ok(member.slice(member.lastIndexOf('useEffect(() => {', at), at).trim() === 'useEffect(() => {', 'the perf mark and the boot stages stay in the passive effect')
+  t.absent(effect.includes('seedMany('), 'the names are not seeded after the first paint')
+  const seedAt = member.indexOf('useLayoutEffect(() => {')
+  t.ok(seedAt > 0 && seedAt < at, 'a layout effect before the boot effect')
+  const seeds = member.slice(seedAt, member.indexOf('}, [])', seedAt))
+  t.ok(seeds.includes('if (boot.snapshot !== null) seedMany(Object.entries(boot.snapshot.names))'), 'the stored names are seeded before the first paint, only for authors not known yet')
+  t.ok(seeds.includes('if (boot.moments !== null) seedMany(boot.moments.names.map('), 'and the strip names')
+  t.absent(seeds.includes('learnMany(') || effect.includes('learnMany('), 'never learnMany: it would overwrite a newer entry')
+  t.is((member.match(/\bseedMany\(/g) || []).length, 2, 'no other seed')
   t.ok(member.includes("perfMarks().mark('rows-live')"), 'the first live page is marked')
 })
 
@@ -402,7 +409,7 @@ test('App.js: the preview is fail-closed and never reads the keychain before the
 
 test('App.js: the preview reads the Momentos copy for the snapshot owner and stays off without it', (t) => {
   const app = withoutComments(APP_JS)
-  t.ok(app.includes("import { loadScreenSnapshotText } from './src/screenSnapshotStore'") && app.includes("import { parseScreenSnapshot } from './src/screenSnapshot'"))
+  t.ok(/import \{[^}]*\bloadScreenSnapshotText\b[^}]*\} from '\.\/src\/screenSnapshotStore'/.test(app) && app.includes("import { parseScreenSnapshot } from './src/screenSnapshot'"))
   const read = app.indexOf('if (!previewCapable || !appActive || previewAsked.current) return')
   const effect = app.slice(read, app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])'))
   t.ok(effect.includes("moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })"), 'same binding plus the feed snapshot owner, as the member only, read without clearing a refused copy')
@@ -441,7 +448,7 @@ test('sessionStore.web.js and configStore.web.js twins hold nothing for the prev
 
 test('App.js: a stale preview (purge or another binding) is dropped and only a fresh read brings one back', (t) => {
   const app = withoutComments(APP_JS)
-  t.ok(app.includes("import { cacheGeneration, wipeLocalCaches } from './src/localCaches'"))
+  t.ok(app.includes("import { cacheGeneration, wipeEpoch, wipeLocalCaches } from './src/localCaches'"))
   const stale = app.slice(app.indexOf('const previewStale ='), app.indexOf('useEffect(() => {', app.indexOf('const previewStale =')))
   t.ok(stale.includes('previewSeed.gen !== cacheGeneration()'), 'a purge since the read')
   t.ok(stale.includes('installationOrigin() !== previewSeed.origin'), 'another installation')
@@ -940,4 +947,64 @@ test('a short incomplete first page and an incomplete walk: the next sync tick s
   t.is(paging.planSyncRead(feed, { [FOLLOW]: 5 }, true, 25), null, 'no growth: no read')
   const plan = paging.planSyncRead(feed, { [FOLLOW]: 6 }, true, 25)
   t.ok(plan !== null && plan.kind === 'newest', 'growth plans the newest read, which settles the list from the top')
+})
+
+// socialRowProps with the screen's pure imports, the rest stubbed.
+async function compileRowProps () {
+  const { replyMarkOf } = await import('../src/who.js')
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { commentedLabel, knownReplies } = await import('../src/feedFold.js')
+  const body = [fnText(CODE, 'refOf'), fnText(CODE, 'withActions'), fnText(CODE, 'socialRowProps')].join('\n')
+  // eslint-disable-next-line no-new-func
+  return new Function('replyMarkOf', 'cachedRow', 'commentedLabel', 'knownReplies', 'pickAvatar', 'installationOrigin', 'postLink', 'actingPageKey', 'canDelete',
+    body + '\nreturn socialRowProps')(replyMarkOf, cachedRow, commentedLabel, knownReplies, () => null, () => null, () => null, () => null, () => false)
+}
+
+test('a stranger quote under a copy row is kept as copy, a followed one as followed', async (t) => {
+  const socialRowProps = await compileRowProps()
+  const quoted = { ...post(GONE, 3), quote: null }
+  const known = new Set([OWN, FOLLOW])
+  const social = {
+    social: { flags: { indexing: false, complete: true }, counts: new Map(), eng: { liked: new Set(), reposted: new Set() }, pending: new Map() },
+    original: (ref) => (ref === GONE + ':3' ? quoted : ref === FOLLOW + ':4' ? { ...post(FOLLOW, 4), quote: null } : undefined),
+    transient: () => false,
+    pending: () => false,
+    persistOf: (author) => known.has(author),
+    retry: () => {},
+    toggle: () => {},
+    notify: undefined
+  }
+  const row = (quoteAuthor, quoteSeq, strangerPersist) => socialRowProps({
+    post: { ...post(FOLLOW, 9), quote: { author: quoteAuthor, seq: quoteSeq } },
+    ref: FOLLOW + ':9',
+    social,
+    profileOf: () => null,
+    now: 0,
+    ownKey: OWN,
+    h: {},
+    persist: true,
+    ...(strangerPersist === undefined ? {} : { strangerPersist })
+  })
+  t.is(row(GONE, 3, 'copy').quote.persist, 'copy', 'an unknown quote author under a copy row')
+  t.is(row(FOLLOW, 4, 'copy').quote.persist, true, 'a followed quote author stays kept as followed')
+  t.is(row(GONE, 3, 'peek').quote.persist, 'peek', 'peek still passes through')
+  t.is(row(GONE, 3).quote.persist, false, 'nothing passed: never kept')
+  t.is(row(GONE, 3, true).quote.persist, false, 'only peek or copy pass through')
+})
+
+test('A Rua\'s member list and its preview pass copy for stranger originals; the page list passes none', (t) => {
+  t.is((member.match(/strangerPersist: 'copy'/g) || []).length, 3, 'the fold row, the repost row and the post row')
+  t.ok(member.includes("foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, strangerPersist: 'copy' })"), 'the fold row')
+  t.ok(member.includes("fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })} />\n    }"), 'the repost row')
+  t.ok(member.includes("persist: true, cache: rowCache, rowKey: feedKey(item), fold: fold.attached.get(feedKey(item)) || null, strangerPersist: 'copy' })"), 'the post row keeps persist: true')
+  t.absent(page.includes('strangerPersist'), 'PageARua passes none')
+  const fold = fnText(CODE, 'foldRowView')
+  t.ok(fold.includes('persist, strangerPersist = false }) {'), 'the fold row takes it, off by default')
+  t.ok(fold.includes('fold: item, strangerPersist })'), 'and hands it to socialRowProps')
+  const preview = fnText(CODE, 'ARuaPreview')
+  t.is((preview.match(/strangerPersist: 'copy'/g) || []).length, 3, 'the preview\'s three rows')
+  t.is((preview.match(/persist: true/g) || []).length, 1, 'only the post row keeps an explicit persist: true (a fold root may be a stranger)')
+  t.ok(/persistOf: \(\) => 'copy',/.test(fnText(CODE, 'previewSocial')), 'previewSocial answers copy')
+  t.ok(CODE.includes('const persistOf = useCallback((author) => typeof author === \'string\' && isKnown(author.toLowerCase()), [isKnown])'), 'useSocial\'s persistOf is unchanged')
+  t.ok(CODE.includes('persistOf: social.persistOf,') && CODE.includes('isKnown: latest.persistOf,'), 'and it is still the isKnown of the snapshot build')
 })
