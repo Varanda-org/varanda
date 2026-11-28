@@ -182,13 +182,34 @@ test('dropKeptAuthors and keepOnlyKeptAuthors work by author', async (t) => {
   t.absent(files().has(b1))
   t.ok(files().has(a1) && files().has(a2))
   const b2 = keep.keep('posts', B, desc({ start: 3 }), bytesOf(4))
-  keep.keepOnlyKeptAuthors(undefined)
-  t.is(keptFiles().length, 3, 'a missing set deletes nothing')
-  keep.keepOnlyKeptAuthors(new Set([B]))
+  t.alike(keep.keepOnlyKeptAuthors(undefined), [], 'a missing set deletes nothing')
+  t.is(keptFiles().length, 3)
+  t.alike(keep.keepOnlyKeptAuthors(new Set([B])).sort(), [a1, a2].sort(), 'the URIs of the deleted files')
   t.absent(files().has(a1) || files().has(a2), 'authors outside the set go')
   t.ok(files().has(b2))
-  keep.keepOnlyKeptAuthors(new Set())
-  t.alike(keptFiles(), [], 'an empty set deletes everything')
+  t.alike(keep.keepOnlyKeptAuthors(new Set()), [b2], 'an empty set deletes everything')
+  t.alike(keptFiles(), [])
+  t.alike(keep.keepOnlyKeptAuthors(new Set()), [], 'nothing left to delete')
+})
+
+// The memory cache forgets what keepOnlyKeptAuthors reports, so a file whose
+// delete it could not confirm (the check after it threw) is reported too.
+test('keepOnlyKeptAuthors reports a file whose delete it could not confirm', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  const a1 = keep.keep('posts', A, desc(), bytesOf(4))
+  const del = Object.getOwnPropertyDescriptor(File.prototype, 'delete')
+  const exists = Object.getOwnPropertyDescriptor(File.prototype, 'exists')
+  t.teardown(() => {
+    Object.defineProperty(File.prototype, 'delete', del)
+    Object.defineProperty(File.prototype, 'exists', exists)
+  })
+  let deleted = false
+  Object.defineProperty(File.prototype, 'delete', { ...del, value () { del.value.call(this); deleted = true } })
+  Object.defineProperty(File.prototype, 'exists', { ...exists, get () { if (deleted) throw new Error('unreadable'); return exists.get.call(this) } })
+  t.alike(keep.keepOnlyKeptAuthors(new Set([B])), [a1])
+  t.absent(files().has(a1))
 })
 
 // A kept file left by an earlier run: written straight to the stub, so this

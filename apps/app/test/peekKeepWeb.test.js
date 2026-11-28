@@ -302,6 +302,7 @@ test('through registerKeptStore and loadKept: block, range revoke, retain and wi
   })
 
   await ready()
+  t.is(cleared.length, 0, 'a keep-only leaves the in-memory URLs (no file URI to forget)')
   t.is(await load(A, desc()), 'blob:7,7,7,7:image/jpeg', 'a miss is fetched')
   t.is(fetches, 1)
   await settle()
