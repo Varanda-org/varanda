@@ -7,6 +7,7 @@ const path = require('node:path')
 const PUBLIC = path.join(__dirname, '..', 'public')
 const WORKFLOW = path.join(__dirname, '..', '..', '..', '.github', 'workflows', 'site.yml')
 const APP_STORE = 'https://apps.apple.com/br/app/id6831662804'
+const PLAY = 'https://play.google.com/store/apps/details?id=app.varanda'
 
 const read = (...p) => fs.readFileSync(path.join(PUBLIC, ...p), 'utf8')
 const size = (...p) => fs.statSync(path.join(PUBLIC, ...p)).size
@@ -120,10 +121,11 @@ test('absolute URLs are https and on the allowlist', (t) => {
     const url = new URL(u, 'http://invalid.example')
     t.is(url.protocol, 'https:', 'https: ' + u)
     // bora.varanda.app is the hosted app the buttons open: only the root, so no tracking parameter gets in
-    // the App Store link is the bare listing, so no campaign token gets in
+    // the store links are the bare listings, so no campaign token gets in
     const ok = url.host === 'varanda.app' ||
       u === 'https://bora.varanda.app/' ||
       u === APP_STORE ||
+      u === PLAY ||
       (url.host === 'github.com' &&
         (url.pathname === '/Varanda-org/varanda' || url.pathname.startsWith('/Varanda-org/varanda/')))
     t.ok(ok, 'allowed: ' + u)
@@ -158,6 +160,23 @@ test('the iPhone App Store link leads, next to each hosted-app link', (t) => {
   }
   t.is(meta['apple-itunes-app'], 'app-id=6831662804', 'Safari smart app banner names the app')
   t.absent(/ainda não está nas lojas/i.test(html), 'no claim that the app is missing from every store')
+})
+
+test('the Android Google Play link sits between each App Store link and its hosted-app link', (t) => {
+  const links = html.match(new RegExp('href="' + PLAY.replace(/[.?]/g, '\\$&') + '"', 'g')) || []
+  t.is(links.length, 2, 'exactly two Google Play buttons')
+  for (const [play, apple, hosted] of [['cta-play-inicio', 'cta-loja-inicio', 'cta-inicio'], ['cta-play-gente', 'cta-loja-gente', 'cta-gente']]) {
+    const tag = new RegExp('<a\\s[^>]*\\bid="' + play + '"[^>]*>').exec(html)
+    t.ok(tag, 'link #' + play)
+    if (!tag) continue
+    const a = attrs(tag[0])
+    t.is(a.href, PLAY, play + ' opens the Google Play listing')
+    t.ok(a.class.split(/\s+/).includes('botao--loja'), play + ' uses the store button style')
+    t.ok(html.indexOf('id="' + apple + '"') < html.indexOf('id="' + play + '"'), apple + ' comes before ' + play)
+    t.ok(html.indexOf('id="' + play + '"') < html.indexOf('id="' + hosted + '"'), play + ' comes before ' + hosted)
+    t.ok(a['aria-describedby'] && html.includes('id="' + a['aria-describedby'] + '"'), play + ' describedby points to an existing id')
+  }
+  t.absent(/não está na google play/i.test(html), 'no claim that the app is missing from Google Play')
 })
 
 test('copy rules', (t) => {
