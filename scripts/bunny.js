@@ -40,6 +40,11 @@ const fs = require('node:fs')
 const API = 'https://api.bunny.net'
 const TIMEOUT_MS = 30 * 1000
 const DEFAULT_NAME = 'varanda-media'
+// Bunny refuses a create without an origin. This one (RFC 6761 .invalid)
+// never resolves, so a run that stops after the create leaves a zone that
+// proxies nothing until the rules are in and the settings write sets the
+// real origin.
+const CREATE_ORIGIN = 'https://origin.invalid'
 const EDGE_HEADER = 'X-Varanda-Edge'
 const PREFIX = 'varanda: '
 const RULE_SECRET = PREFIX + EDGE_HEADER
@@ -273,8 +278,8 @@ function planChanges (zone, { origin, hostname, secret }) {
   })
   // A copy cached before the block or cache rule (or under another origin)
   // can carry the origin's one-year lifetime: an existing zone whose rules or
-  // settings change is purged once. A new zone has no origin until its rules
-  // are in, so nothing to purge.
+  // settings change is purged once. A new zone has only an origin that never
+  // resolves until its rules are in, so nothing to purge.
   const cacheChanges = settings.length > 0 ||
     rules.some((r) => r.action !== null && r.desired.Description !== RULE_SECRET)
   return {
@@ -607,7 +612,7 @@ async function runApply (api, out, ctx) {
   ctx.purgePending = purge
   if (purge) out.say('Esta execução termina limpando o cache da zona; se parar antes, rode apply --purge.')
   if (plan.create) {
-    await api.request('POST', '/pullzone', { body: { Name: ctx.name } })
+    await api.request('POST', '/pullzone', { body: { Name: ctx.name, OriginUrl: CREATE_ORIGIN } })
     writes++
     out.say('Zona ' + ctx.name + ' criada.')
     zone = await findZone(api, ctx.name)
@@ -882,6 +887,7 @@ async function main (argv, {
 
 module.exports = {
   API,
+  CREATE_ORIGIN,
   RULE_SECRET,
   RULE_MEDIA,
   RULE_CACHE,

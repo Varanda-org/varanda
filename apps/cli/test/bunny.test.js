@@ -21,11 +21,11 @@ function hex (n) {
 }
 
 // Bunny-like defaults for a new zone, most of them unlike what apply sets.
-function newZone (id, name) {
+function newZone (id, name, origin = '') {
   return {
     Id: id,
     Name: name,
-    OriginUrl: '',
+    OriginUrl: origin,
     OriginType: 0,
     Type: 0,
     EnableGeoZoneSA: true,
@@ -90,7 +90,10 @@ async function fakeBunny (t, key) {
         return send(200, state.zones.filter((z) => z.Name.includes(s)))
       }
       if (req.method === 'POST' && u.pathname === '/pullzone') {
-        state.zones.push(newZone(state.nextId++, body.Name))
+        if (!body || typeof body.OriginUrl !== 'string' || body.OriginUrl === '') {
+          return send(400, { ErrorKey: 'pullzone.origin_url_required', Field: 'OriginUrl', Message: 'The Origin URL is required when creating a pull zone with origin type OriginUrl.' })
+        }
+        state.zones.push(newZone(state.nextId++, body.Name, body.OriginUrl))
         return send(201)
       }
       if (req.method === 'GET' && u.pathname === '/pullzone/loadFreeCertificate') {
@@ -204,7 +207,8 @@ test('bunny: apply sets up the zone, verifies it, and a second apply writes noth
     '/pullzone/100',
     '/pullzone/100/addHostname'
   ], 'the rules go in before the origin is set')
-  t.alike(writes[0].body, { Name: NAME }, 'create sends the name only')
+  t.alike(writes[0].body, { Name: NAME, OriginUrl: bunny.CREATE_ORIGIN }, 'create sends the name and an origin that never resolves')
+  t.ok(new URL(bunny.CREATE_ORIGIN).hostname.endsWith('.invalid'), 'the create origin is under .invalid')
   t.is(writes[1].body.Description, bunny.RULE_MEDIA, 'the block rule is the first write after the create')
   t.alike(writes[4].body, bunny.desiredSettings(ORIGIN), 'only the settings we set')
   t.alike(writes[5].body, { Hostname: HOST })
@@ -301,6 +305,25 @@ test('bunny: an existing zone whose rules change is purged once, after the write
   const resumed = await run(['apply', ...full])
   t.is(resumed.code, 0, resumed.stderr)
   t.alike(fake.writes().slice(n).map((r) => r.path), ['/pullzone/' + z.Id + '/addHostname'], 'the rerun only adds the hostname')
+})
+
+test('bunny: a run that stops right after the create leaves a zone that reaches nothing, and apply finishes it', async (t) => {
+  const { fake, run, full } = await setup(t)
+  fake.inject = { method: 'POST', path: /\/edgerules\/addOrUpdate$/, status: 500, json: { ErrorKey: 'x', Message: 'y' } }
+  const stop = await run(['apply', ...full])
+  t.is(stop.code, 1)
+  t.ok(stop.stderr.includes('pela metade'), 'says the state may be partial')
+  t.is(fake.zones.length, 1)
+  const z = fake.zones[0]
+  t.is(z.OriginUrl, bunny.CREATE_ORIGIN, 'only the origin that never resolves')
+  t.alike(z.EdgeRules, [], 'no rule yet')
+
+  const resumed = await run(['apply', ...full])
+  t.is(resumed.code, 0, resumed.stderr)
+  t.ok(resumed.stdout.includes('tudo conferido'))
+  t.is(fake.zones.length, 1, 'no second zone')
+  t.is(z.OriginUrl, ORIGIN, 'the real origin is set')
+  t.alike(z.EdgeRules.map((r) => r.Description).sort(), [bunny.RULE_SECRET, bunny.RULE_MEDIA, bunny.RULE_CACHE].sort(), 'the three rules are in')
 })
 
 test('bunny: Perma-Cache or a script on the zone stops plan and apply before any write', async (t) => {
