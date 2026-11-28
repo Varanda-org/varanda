@@ -1,13 +1,15 @@
 # Verificação: docs/legal-cdn
 
-Termos e Política na versão 115, com a CDN das fotos públicas descrita como desligada e o provedor (BunnyWay d.o.o., bunny.net) nomeado.
+Termos e Política na versão 116, com a CDN das fotos públicas descrita como desligada e o provedor (BunnyWay d.o.o., bunny.net) nomeado.
+
+Este PR saiu como versão 115. A `main` usou a 115 para o texto das cópias guardadas no aparelho (27/11/2026), então este texto passou a ser a 116, com a mesma data e por cima daquele.
 
 ## Testes (`node <arquivo>`)
 
-- `apps/app/test/legal.test.js`: `LEGAL_VERSION` 115, a nota de revisão, o novo digest do texto e o teste "version 115 names Bunny as the CDN edge, still off, and what it keeps", que exige cada frase da Política sobre a CDN (provedor, registros por até 3 dias, endereço anonimizado só no que a associação vê, cópias por no máximo um minuto), recusa um texto que a diga ligada, recusa a antiga promessa de nomear o provedor depois e recusa a promessa de registros guardados já anonimizados.
+- `apps/app/test/legal.test.js`: `LEGAL_VERSION` 116, a nota de revisão, o novo digest do texto e o teste "version 116 names Bunny as the CDN edge, still off, and what it keeps", que exige cada frase da Política sobre a CDN (provedor, registros por até 3 dias, endereço anonimizado só no que a associação vê, cópias por no máximo um minuto), recusa um texto que a diga ligada, recusa a antiga promessa de nomear o provedor depois e recusa a promessa de registros guardados já anonimizados.
 - `apps/app/test/terms-version.test.js`: `LEGAL_VERSION` igual ao `TERMS_VERSION` de `packages/core/lib/terms.js`.
-- `packages/core/test/terms.test.js`: `TERMS_VERSION` 115.
-- `apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` são o render de `legal.js` (`node apps/site/scripts/render-legal.js`), na versão 115.
+- `packages/core/test/terms.test.js`: `TERMS_VERSION` 116.
+- `apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` são o render de `legal.js` (`node apps/site/scripts/render-legal.js`), na versão 116.
 
 ## Conferido no código
 

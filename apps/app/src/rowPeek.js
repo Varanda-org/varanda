@@ -15,13 +15,16 @@ export const PEEK_BATCH = 4
 
 const triedKey = (scope, peer) => scope + ':' + peer.toLowerCase()
 
-// The next peers to ask for: rows near the top, profile.read said "missing",
-// no verified peek yet, not asked in this scope, at most `batch`.
-export function planRowPeeks ({ peers, profileOf, isPeeked, tried, scope, window = PEEK_WINDOW, batch = PEEK_BATCH }) {
+// The next peers to ask for: rows near the top, profile.read said "missing"
+// or the name is a peek an earlier run saved (`isSaved`: it no longer reads as
+// missing, yet this run has not verified it), no verified peek yet, not asked
+// in this scope, at most `batch`.
+export function planRowPeeks ({ peers, profileOf, isPeeked, isSaved = () => false, tried, scope, window = PEEK_WINDOW, batch = PEEK_BATCH }) {
   const out = []
   for (const peer of (Array.isArray(peers) ? peers : []).slice(0, window)) {
     if (typeof peer !== 'string' || peer === '' || tried.has(triedKey(scope, peer))) continue
-    if (!wantsPeek(profileOf(peer)) || isPeeked(peer)) continue
+    if (isPeeked(peer)) continue
+    if (!wantsPeek(profileOf(peer)) && !isSaved(peer)) continue
     out.push(peer)
     if (out.length >= batch) break
   }

@@ -3,7 +3,9 @@
 // `quote` = { author, name, username, at, text, media, missing, onOpen } with
 // RAW peer strings (displayText is applied here); optional `thumbs` (the
 // read's thumbnail list, aligned with media) and `persist` (true
-// only for own or followed authors; absent = the photos are never cached)
+// only for own or followed authors; 'peek' for a stranger quoted by an
+// Espiadinha first-page row, kept in the peek store; 'copy' for a reopened
+// screen's saved copy; absent = the photos are never cached)
 // and `hasQuote` (the quoted post itself quotes another one: shown as the
 // line 'cita outra publicação', never a second card). `missing` shows 'Publicação indisponível'; a quote with
 // neither text nor photos and not missing is still loading. The whole card
@@ -25,6 +27,7 @@ import { compactTime, relativeTime } from '../format'
 import { embedOf, sameMusicPage } from '../musicEmbed'
 import { textWithoutHrefs } from '../links'
 import { whoOf } from '../who'
+import { persistMode } from '../media/keptLoad'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
 import { LinkCard } from './LinkCard'
@@ -66,8 +69,8 @@ export function QuoteCard ({ quote, now }) {
   const shownText = embed !== null && hasText ? textWithoutHrefs(q.text, (href) => sameMusicPage(href, q.preview.url)) : q.text
   const preview = !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string'
     ? embed !== null
-      ? <MusicEmbedCard embed={embed} card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} part='q' />
-      : <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
+      ? <MusicEmbedCard embed={embed} card={q.preview} thumb={{ kind: 'post', author: q.author, persist: persistMode(q.persist) }} part='q' />
+      : <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: persistMode(q.persist) }} />
     : null
   const loading = !missing && !hasText && !hasMedia
   const who = whoOf({ name: q.name, username: q.username })
@@ -90,7 +93,7 @@ export function QuoteCard ({ quote, now }) {
           onPress={open}
           style={({ pressed }) => [styles.head, pressed && open && styles.pressed]}
         >
-          {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /></View> : null}
+          {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={persistMode(q.persist)} /></View> : null}
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           <Meta handle={handle} time={time} styles={styles} />
         </Pressable>
@@ -106,7 +109,7 @@ export function QuoteCard ({ quote, now }) {
           ? (
             <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
               {hasMedia
-                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={q.persist === true} mosaic /></View>
+                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={persistMode(q.persist)} mosaic /></View>
                 : null}
               {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}
             </Pressable>
@@ -128,7 +131,7 @@ export function QuoteCard ({ quote, now }) {
         : (
           <>
             <View style={styles.head}>
-              {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /></View> : null}
+              {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={persistMode(q.persist)} /></View> : null}
               <Text style={styles.name} numberOfLines={1}>{title}</Text>
               <Meta handle={handle} time={time} styles={styles} />
             </View>
@@ -137,7 +140,7 @@ export function QuoteCard ({ quote, now }) {
               ? <Text style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
               : null}
             {hasMedia
-              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={q.persist === true} mosaic /></View>
+              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={persistMode(q.persist)} mosaic /></View>
               : null}
             {preview}
             {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}

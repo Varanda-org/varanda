@@ -264,6 +264,7 @@ test('store version and build number are checked and shown on native only', asyn
   t.alike(storeInfo({ name: '1.2.3', build: 45 }), { name: '1.2.3', build: '45' })
   t.alike(storeInfo({ name: '1.2.3\nx', build: '0' }), { name: null, build: null })
   t.alike(storeInfo(), { name: null, build: null })
+  t.alike(storeInfo(null), { name: null, build: null }, 'the web passes null')
   const android = buildInfo({ kind: 'android', commit: B, builtAt: BUILT })
   const ok = { status: 'ok', commit: A }
   const store = storeInfo({ name: '1.2.3', build: '45' })

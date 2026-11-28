@@ -3,15 +3,16 @@
 // react-native, no Node built-ins; the per-platform text store lives in
 // ./feedSnapshotStore.*.js.
 //
-// Why it is safe to keep: only rows of the own diary and of followed diaries
-// are stored, with the names, counts, own like/repost state and resolved
-// originals (reposted, quoted and reply-parent posts) of those same
-// authors. Those blocks already sit unencrypted in this device's replicas
-// (the node downloads every followed diary), so the snapshot holds nothing
-// the device did not already hold. A reposted original, quote, reply parent
-// or name of an author who is neither own nor followed is never stored:
-// that row then renders as it does while its original is unresolved.
-// Nothing of the Espiadinha, DMs, groups or notices is ever stored here.
+// What is kept: only rows of the own diary and of followed diaries, with
+// their counts and own like/repost state, the resolved originals those rows
+// reference (reposted, quoted and reply-parent posts, one level further for
+// what such an original quotes or replies to) and the names of every author
+// stored. An original and its author's name are kept whoever wrote it, so a
+// reopened row that reposts, quotes or replies to someone not followed shows
+// that post at once instead of an unresolved card: the member already saw it
+// on that row. Nothing of a blocked author is ever stored, and dropping an
+// author (a block) removes their originals and name too. Nothing of the
+// Espiadinha, DMs, groups or notices is ever stored here.
 //
 // Shape (version 1): { v, origin, association, owner, savedAt, cursor,
 // items, names, counts, liked, reposted, originals }
@@ -272,9 +273,10 @@ function keySet (src) {
   return new Set()
 }
 
-// Everything that depends on `rows`, from the given sources, keeping only
-// what `ok(author)` allows (names, originals) and only the rows' own refs
-// (counts, liked, reposted).
+// Everything that depends on `rows` (already filtered by the caller), from
+// the given sources: the originals the rows reference and the names of the
+// row authors and of those originals' authors, both only where `ok(author)`
+// allows, and only the rows' own refs (counts, liked, reposted).
 function assemble (rows, ok, { nameOf, countOf, isLiked, isReposted, originalAt }) {
   const shown = []
   const first = []
@@ -344,6 +346,7 @@ export function buildSnapshot ({ origin, association, owner, items, cursor, prof
     const known = typeof isKnown === 'function' ? isKnown : () => false
     const block = keySet(blocked)
     const ok = (a) => !block.has(a) && (a === owner || known(a) === true)
+    const notBlocked = (a) => !block.has(a)
     const head = items.slice(0, FEED_LIMIT_DEFAULT)
     const rows = []
     let whole = items.length <= FEED_LIMIT_DEFAULT
@@ -387,7 +390,7 @@ export function buildSnapshot ({ origin, association, owner, items, cursor, prof
       const kept = rows.slice(0, n)
       const last = kept[kept.length - 1]
       const bound = whole && n === rows.length && given !== null ? given : { at: last.at, author: last.author, seq: last.seq }
-      const snapshot = { v: SNAPSHOT_VERSION, origin, association, owner, savedAt: now, cursor: bound, ...assemble(kept, ok, sources) }
+      const snapshot = { v: SNAPSHOT_VERSION, origin, association, owner, savedAt: now, cursor: bound, ...assemble(kept, notBlocked, sources) }
       if (snapshotBytes(snapshot) <= SNAPSHOT_MAX_BYTES) return snapshot
     }
     return null
@@ -464,7 +467,8 @@ function rebuild (snapshot, rows, allow) {
 
 // Without the rows of `keys` (a Set or list of hex keys), reposts of their
 // posts included (as the node leaves out a blocked author's reposts), and
-// without their names and originals. -> a new snapshot, or null.
+// without their names and originals, even those a kept row quotes or replies
+// to. -> a new snapshot, or null.
 export function withoutAuthors (snapshot, keys) {
   try {
     const drop = keySet(keys)
@@ -476,14 +480,15 @@ export function withoutAuthors (snapshot, keys) {
 }
 
 // Only the rows of the own diary and of `allowed` (a Set or list of hex
-// keys, e.g. the follow list now). A repost by an allowed author of someone
-// else's post stays; its original goes unless that author is allowed too.
+// keys, e.g. the follow list now). The originals and names the kept rows
+// reference stay whoever wrote them (a repost by an allowed author keeps its
+// original); an original no kept row references goes with its rows.
 // -> a new snapshot, or null.
 export function keepOnlyAuthors (snapshot, allowed) {
   try {
     const keep = keySet(allowed)
     const rows = snapshot.items.filter((r) => r.author === snapshot.owner || keep.has(r.author))
-    return rebuild(snapshot, rows, (a) => keep.has(a))
+    return rebuild(snapshot, rows, () => true)
   } catch {
     return null
   }

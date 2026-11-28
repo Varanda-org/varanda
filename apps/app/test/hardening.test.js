@@ -547,7 +547,7 @@ test('the share extension target is built, embedded and versioned like the app',
   t.ok(script.includes('host=\\"' + HOST_PLIST_PATH + '\\"'), 'the app plist')
   t.ok(script.includes('plist=\\"' + BUILT_PLIST_PATH + '\\"'), 'the built extension plist')
 
-  for (const setting of ['INFOPLIST_FILE = VarandaShare/Info.plist;', 'APPLICATION_EXTENSION_API_ONLY = YES;', 'SKIP_INSTALL = YES;', 'MARKETING_VERSION = 0.1.0;', 'CURRENT_PROJECT_VERSION = 1;']) {
+  for (const setting of ['INFOPLIST_FILE = VarandaShare/Info.plist;', 'APPLICATION_EXTENSION_API_ONLY = YES;', 'SKIP_INSTALL = YES;', 'MARKETING_VERSION = ' + JSON.parse(read('app.json')).expo.version + ';', 'CURRENT_PROJECT_VERSION = 1;']) {
     t.is(pbxproj.split(setting).length - 1, setting.startsWith('MARKETING') || setting.startsWith('CURRENT') ? 4 : 2, setting)
   }
   t.absent(/SWIFT_OBJC_BRIDGING_HEADER = "?VarandaShare/.test(pbxproj), 'no bridging header')

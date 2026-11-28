@@ -411,6 +411,54 @@ test('dropAuthors, dropRanges and retain take any iterable', async (t) => {
   t.is(await store.dropAuthors(null), false)
 })
 
+test('keepOnlyAuthors deletes the unlisted authors in the queue, under this binding only', async (t) => {
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', A, desc({ start: 1 }), bytesOf(4))
+    await store.put('peekPosts', B, desc({ start: 10 }), bytesOf(4))
+    await store.put('peekAvatars', B, desc({ start: 20 }), bytesOf(4))
+    t.is(await store.keepOnlyAuthors(new Set([A.toUpperCase()])), true)
+    t.alike([...backend.state.meta.values()].map((r) => r.start), [1], 'only the listed author stays')
+    t.is(await store.keepOnlyAuthors([]), true)
+    t.is(backend.state.meta.size, 0, 'an empty list keeps nobody')
+    t.is(await store.keepOnlyAuthors(A), false, 'a string is not a list')
+    t.is(await store.keepOnlyAuthors(null), false)
+  }
+  {
+    const { backend, second } = await twoStores()
+    t.is(await second.keepOnlyAuthors([A]), false, 'not bound yet')
+    t.is(await second.bind(ME), true)
+    t.alike(await second.read('peekPosts', B, desc({ start: 1 })), bytesOf(4), 'and not kept for the first bind')
+    t.is(backend.state.meta.size, 2)
+  }
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', B, desc(), bytesOf(4))
+    const wiped = store.wipe()
+    t.is(await store.keepOnlyAuthors([A]), false, 'a wipe queued before turns it off')
+    t.is(await wiped, true)
+    t.absent(backend.state.calls.includes('remove'))
+  }
+  {
+    const { store, backend } = await setup()
+    await store.bind(ME)
+    await store.put('peekPosts', B, desc(), bytesOf(4))
+    const gate = {}
+    const list = backend.list
+    backend.list = async () => { await new Promise((resolve) => { gate.open = resolve }); return list() }
+    const pending = store.keepOnlyAuthors([A])
+    await new Promise((resolve) => setImmediate(resolve))
+    const rebound = store.bind({ ...ME, owner: B })
+    backend.list = list
+    gate.open()
+    t.is(await pending, false, 'a rebind while it lists gives up')
+    t.absent(backend.state.calls.includes('remove'), 'and removes nothing for the old binding')
+    await rebound
+  }
+})
+
 test('a put after another tab rebinds or wipes writes nothing', async (t) => {
   const { store, backend } = await setup()
   await store.bind(ME)
@@ -422,4 +470,164 @@ test('a put after another tab rebinds or wipes writes nothing', async (t) => {
   t.is(backend.state.meta.size, 0)
   backend.state.binding = { ...ME }
   t.is(await store.put('peekPosts', B, desc(), bytesOf(4)), true, 'the same binding writes')
+})
+
+const SHA = 'f7'.repeat(32)
+const SHA2 = '8a'.repeat(32)
+
+async function copySetup (opts = {}) {
+  const m = await load()
+  return setup({ kinds: m.COPY_PHOTO_KINDS, maxBytes: m.COPY_PHOTO_MAX_BYTES, maxFiles: m.COPY_PHOTO_MAX_FILES, maxAgeMs: m.COPY_PHOTO_MAX_AGE_MS, ...opts })
+}
+
+test('copy constants beside the peek ones', async (t) => {
+  const m = await load()
+  t.alike(m.COPY_PHOTO_KINDS, ['copyAvatars', 'copyPosts', 'copyGroupThumbs'])
+  t.is(m.COPY_GROUP_THUMBS, 'copyGroupThumbs')
+  t.is(m.COPY_PHOTO_MAX_BYTES, 8 * 1024 * 1024)
+  t.is(m.COPY_PHOTO_MAX_FILES, 200)
+  t.is(m.COPY_PHOTO_MAX_AGE_MS, 14 * DAY)
+  t.is(m.GROUP_THUMB_MAX_BYTES, 256 * 1024)
+  t.alike(m.PEEK_PHOTO_KINDS, ['peekAvatars', 'peekPosts'], 'the peek kinds are unchanged')
+})
+
+test('the kinds option: a store holds only its own kinds', async (t) => {
+  const peek = await setup()
+  await peek.store.bind(ME)
+  t.is(await peek.store.put('copyPosts', B, desc(), bytesOf(4)), false, 'the peek store refuses a copy kind')
+  t.is(await peek.store.putThumb(B, SHA, bytesOf(4), 'image/jpeg'), false, 'and a group picture')
+  t.is(await peek.store.readThumb(B, SHA), null)
+  t.is(await peek.store.retainThumbs([]), false)
+  t.is(peek.backend.state.meta.size, 0)
+
+  const { store, backend } = await copySetup()
+  await store.bind(ME)
+  t.is(await store.put('peekPosts', B, desc(), bytesOf(4)), false, 'the copy store refuses a peek kind')
+  t.is(await store.put('copyGroupThumbs', B, desc(), bytesOf(4)), false, 'a group picture goes through putThumb only')
+  t.is(await store.put('copyPosts', B, desc(), bytesOf(4)), true)
+  t.is(await store.put('copyAvatars', B, desc(), bytesOf(4)), true)
+  t.alike([...backend.state.meta.keys()].sort(), ['copyAvatars/' + B + '-' + CORE + '-1-1', 'copyPosts/' + B + '-' + CORE + '-1-1'])
+  t.alike(await store.read('copyPosts', B, desc()), bytesOf(4))
+  t.is(await store.read('peekPosts', B, desc()), null)
+  backend.state.meta.set('peekPosts/x', { name: 'peekPosts/x', kind: 'peekPosts' })
+  await store.bind(null)
+  await store.bind(ME)
+  t.absent(backend.state.meta.has('peekPosts/x'), 'a row of a foreign kind is removed at bind')
+})
+
+test('group pictures: put, read back, limits and checks', async (t) => {
+  const m = await load()
+  const { store, backend, clock } = await copySetup()
+  await store.bind(ME)
+  t.is(await store.putThumb(B.toUpperCase(), SHA, bytesOf(10), 'image/jpeg'), true)
+  const name = 'copyGroupThumbs/' + B + '-' + SHA
+  t.alike(backend.state.meta.get(name), { name, kind: 'copyGroupThumbs', author: B, sha256: SHA, mime: 'image/jpeg', size: 10, savedAt: clock.t })
+  t.alike(await store.readThumb(B, SHA), bytesOf(10))
+  t.is(await store.readThumb(B, SHA2), null)
+  for (const [author, sha, bytes, mime, why] of [
+    ['nope', SHA, bytesOf(4), 'image/jpeg', 'author'],
+    [B, 'zz'.repeat(32), bytesOf(4), 'image/jpeg', 'hash'],
+    [B, SHA2, bytesOf(4), 'text/html', 'mime'],
+    [B, SHA2, bytesOf(4), 'image/png', 'a type the live draw never shows'],
+    [B, SHA2, new Uint8Array(0), 'image/jpeg', 'empty'],
+    [B, SHA2, bytesOf(m.GROUP_THUMB_MAX_BYTES + 1), 'image/jpeg', 'over 256 KiB'],
+    [B, SHA2, [1, 2], 'image/jpeg', 'bytes only']
+  ]) t.is(await store.putThumb(author, sha, bytes, mime), false, why)
+  t.is(backend.state.meta.size, 1)
+  t.is(await store.putThumb(B, SHA2, bytesOf(m.GROUP_THUMB_MAX_BYTES), 'image/jpeg'), true, 'exactly 256 KiB is kept')
+
+  backend.state.bytes.set(name, bytesOf(9))
+  t.is(await store.readThumb(B, SHA), null, 'stored bytes of another length')
+  t.absent(backend.state.meta.has(name), 'remove the entry')
+  backend.state.meta.set(name, { name, kind: 'copyGroupThumbs', author: B, sha256: SHA, mime: 'image/png', size: m.GROUP_THUMB_MAX_BYTES + 1, savedAt: clock.t })
+  t.is(await store.readThumb(B, SHA), null, 'an oversized row does not answer')
+  t.absent(backend.state.meta.has(name))
+})
+
+test('the copy store: 14-day expiry, its own caps, and only retainThumbs prunes group pictures', async (t) => {
+  {
+    const { store, backend, clock } = await copySetup()
+    await store.bind(ME)
+    await store.put('copyPosts', B, desc(), bytesOf(4))
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    clock.t += 14 * DAY
+    t.alike(await store.read('copyPosts', B, desc()), bytesOf(4), 'fourteen days still read')
+    clock.t += 1
+    t.is(await store.read('copyPosts', B, desc()), null)
+    t.is(await store.readThumb(B, SHA), null)
+    t.is(backend.state.meta.size, 0, 'expired entries are removed')
+  }
+  {
+    const { store, backend, clock } = await copySetup({ maxFiles: 2 })
+    await store.bind(ME)
+    await store.put('copyPosts', B, desc({ start: 1 }), bytesOf(4))
+    clock.t += 1
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    clock.t += 1
+    await store.put('copyAvatars', B, desc({ start: 2 }), bytesOf(4))
+    t.alike([...backend.state.meta.keys()].sort(), ['copyAvatars/' + B + '-' + CORE + '-2-1', 'copyGroupThumbs/' + B + '-' + SHA], 'group pictures share the file cap, oldest first')
+  }
+  {
+    const { store, backend } = await copySetup()
+    await store.bind(ME)
+    await store.put('copyPosts', A, desc({ start: 1 }), bytesOf(4))
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    await store.putThumb(A, SHA2, bytesOf(4), 'image/jpeg')
+    t.is(await store.retain(['copyPosts', 'copyGroupThumbs'], [{ kind: 'copyPosts', author: A, d: desc({ start: 1 }) }]), true)
+    t.is(await store.retain(['copyGroupThumbs'], []), true)
+    t.is(backend.state.meta.size, 3, 'retain never prunes group pictures')
+    t.is(await store.retainThumbs('nope'), false, 'a non-list is ignored')
+    t.is(await store.retainThumbs([{ author: B.toUpperCase(), sha: SHA }, null, { author: 'x', sha: SHA2 }]), true)
+    t.alike([...backend.state.meta.keys()].sort(), ['copyGroupThumbs/' + B + '-' + SHA, 'copyPosts/' + A + '-' + CORE + '-1-1'], 'unnamed group pictures go, other kinds stay')
+    t.is(await store.dropRanges([{ core: CORE, start: 0, blocks: 9 }]), true)
+    t.alike([...backend.state.meta.keys()], ['copyGroupThumbs/' + B + '-' + SHA], 'a range revoke does not reach a group picture')
+    t.is(await store.dropAuthors([B]), true)
+    t.is(backend.state.meta.size, 0, 'a block does')
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    t.is(await store.retainThumbs([]), true)
+    t.is(backend.state.meta.size, 0, 'an empty list removes every group picture')
+  }
+})
+
+test('a retainThumbs spares the queued puts and reads of what it keeps; a drop still cancels them', async (t) => {
+  {
+    const { store, backend } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    await store.putThumb(A, SHA, bytesOf(5), 'image/jpeg')
+    const photo = store.put('copyAvatars', B, desc(), bytesOf(4))
+    const post = store.put('copyPosts', A, desc({ start: 2 }), bytesOf(4))
+    const named = store.readThumb(B, SHA)
+    const unnamedPut = store.putThumb(A, SHA2, bytesOf(6), 'image/jpeg')
+    const unnamedRead = store.readThumb(A, SHA)
+    const retained = store.retainThumbs([{ author: B, sha: SHA }])
+    t.is(await photo, true, 'a copy photo queued before the retain lands')
+    t.is(await post, true, 'so does a copy post')
+    t.alike(await named, bytesOf(4), 'a read of a retained pair answers')
+    t.is(await unnamedPut, false, 'a group picture the retain does not name is dropped')
+    t.is(await unnamedRead, null, 'and so is a read of one')
+    t.is(await retained, true)
+    t.alike([...backend.state.meta.keys()].sort(), ['copyAvatars/' + B + '-' + CORE + '-1-1', 'copyGroupThumbs/' + B + '-' + SHA, 'copyPosts/' + A + '-' + CORE + '-2-1'])
+  }
+  {
+    const { store, backend } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    const photo = store.put('copyAvatars', B, desc(), bytesOf(4))
+    const named = store.readThumb(B, SHA)
+    store.retainThumbs([{ author: B, sha: SHA }])
+    const dropped = store.dropAuthors([B])
+    t.is(await photo, false, 'a drop of the author still cancels the put')
+    t.is(await named, null, 'and the read')
+    await dropped
+    t.is(backend.state.meta.size, 0)
+  }
+  {
+    const { store } = await copySetup()
+    await store.bind(ME)
+    await store.putThumb(B, SHA, bytesOf(4), 'image/jpeg')
+    const named = store.readThumb(B, SHA)
+    store.dropAuthors([B])
+    t.is(await named, null, 'a read overtaken by a drop alone answers null')
+  }
 })
