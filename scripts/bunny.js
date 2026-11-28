@@ -45,6 +45,10 @@ const DEFAULT_NAME = 'varanda-media'
 // proxies nothing until the rules are in and the settings write sets the
 // real origin.
 const CREATE_ORIGIN = 'https://origin.invalid'
+// Bunny's zone list can lag a create by seconds. Bunny documents no body
+// for the create, so the list is the only way to find the new zone.
+const CREATE_WAITS_MS = [1000, 2000, 4000, 8000, 15000]
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const EDGE_HEADER = 'X-Varanda-Edge'
 const PREFIX = 'varanda: '
 const RULE_SECRET = PREFIX + EDGE_HEADER
@@ -592,7 +596,7 @@ async function runPlan (api, out, ctx) {
   return 0
 }
 
-async function runApply (api, out, ctx) {
+async function runApply (api, out, ctx, sleep = wait) {
   let zone = await findZone(api, ctx.name)
   let plan = planChanges(zone, ctx)
   if (plan.duplicates.length > 0) {
@@ -615,8 +619,24 @@ async function runApply (api, out, ctx) {
     await api.request('POST', '/pullzone', { body: { Name: ctx.name, OriginUrl: CREATE_ORIGIN } })
     writes++
     out.say('Zona ' + ctx.name + ' criada.')
-    zone = await findZone(api, ctx.name)
-    if (zone === null) throw new BunnyError('A zona criada não aparece na lista do Bunny; rode apply de novo em instantes', { write: true })
+    // From here a plain "run apply again" is wrong advice: while the list
+    // still lags, apply would try to create the zone a second time.
+    const planFirst = 'Rode plan em instantes e, quando ele mostrar a zona ' + ctx.name + ', rode apply de novo'
+    const lookUp = async () => {
+      try {
+        return await findZone(api, ctx.name)
+      } catch (err) {
+        if (!(err instanceof BunnyError)) throw err
+        throw new BunnyError(err.message + '. A zona foi criada. ' + planFirst)
+      }
+    }
+    zone = await lookUp()
+    for (let i = 0; zone === null && i < CREATE_WAITS_MS.length; i++) {
+      if (i === 0) out.say('A zona ainda não aparece na lista do Bunny; esperando até ' + CREATE_WAITS_MS.reduce((a, b) => a + b, 0) / 1000 + ' s.')
+      await sleep(CREATE_WAITS_MS[i])
+      zone = await lookUp()
+    }
+    if (zone === null) throw new BunnyError('A zona criada ainda não aparece na lista do Bunny. ' + planFirst)
     plan = planChanges(zone, ctx)
   }
   const id = zone.Id
@@ -824,7 +844,8 @@ async function main (argv, {
   stdout = process.stdout,
   stderr = process.stderr,
   fetch = globalThis.fetch,
-  resolveCname = dnsResolveCname
+  resolveCname = dnsResolveCname,
+  sleep = wait
 } = {}) {
   const out = output({ stdout, stderr })
   out.add(env.BUNNY_API_KEY)
@@ -866,7 +887,7 @@ async function main (argv, {
     out.add(key)
     const api = client({ base, key, fetch, out })
     if (opts.cmd === 'plan') return await runPlan(api, out, ctx)
-    if (opts.cmd === 'apply') return await runApply(api, out, ctx)
+    if (opts.cmd === 'apply') return await runApply(api, out, ctx, sleep)
     if (opts.cmd === 'status') return await runStatus(api, out, ctx)
     if (opts.cmd === 'cert') return await runCert(api, out, ctx, resolveCname)
     return await runPurge(api, out, ctx)
@@ -888,6 +909,7 @@ async function main (argv, {
 module.exports = {
   API,
   CREATE_ORIGIN,
+  CREATE_WAITS_MS,
   RULE_SECRET,
   RULE_MEDIA,
   RULE_CACHE,
