@@ -502,7 +502,7 @@ test('update.sh: executable, shebang, required strings and last line', (t) => {
   // All code lives in functions: outside them only assignments and the setup (incl. the unset of the CDN variables).
   const outside = sh.replace(/^[a-z_]+\(\) \{\n[\s\S]*?^\}\n/mg, '').split('\n')
     .filter((l) => l.trim() !== '' && !/^\s*#/.test(l))
-    .filter((l) => !/^[a-z_A-Z]+=/.test(l) && !/^(set -Eeuo pipefail|export PATH|umask 022|unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN|trap '' HUP PIPE|main "\$@")$/.test(l))
+    .filter((l) => !/^[a-z_A-Z]+=/.test(l) && !/^(set -Eeuo pipefail|export PATH|umask 022|unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN VARANDA_CDN_SECRET|trap '' HUP PIPE|main "\$@")$/.test(l))
   const wsBody = sh.match(/^ws_script='\n([\s\S]*?)\n'$/m)
   t.ok(wsBody, 'ws_script located')
   const wsLines = wsBody ? wsBody[1].split('\n').concat("'") : []
@@ -3634,6 +3634,9 @@ test('update.sh: an operator resolution removes a journal left by a failed rollb
 // A CDN origin needs the CDN's ranges too (VARANDA_TRUSTED_PROXIES), or every
 // client of /media/* would share one per-address limit.
 const CDN = 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n'
+// Two well-formed CDN secrets (openssl rand -hex 32).
+const SECRET_A = '0123456789abcdef'.repeat(4)
+const SECRET_B = 'fedcba9876543210'.repeat(4)
 
 // /varanda.json comes from the target's Caddyfile: the probe compares it byte
 // for byte with the JSON built from the env file, the media key last and only
@@ -3715,15 +3718,41 @@ test('update.sh: conferir_env accepts empty or CDN CIDRs in VARANDA_TRUSTED_PROX
     t.ok(res.log.includes('VARANDA_TRUSTED_PROXIES inválido em ' + s.p('etc/varanda.env')), 'says which variable')
   }
 
-  // A CDN origin without the ranges is refused; with them, or the ranges alone, it passes.
+  // A CDN origin without the ranges or the secret is refused; with either, or the ranges alone, it passes.
   const origin = 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\n'
-  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin]) {
+  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin, 'VARANDA_TRUSTED_PROXIES=\nVARANDA_CDN_SECRET= # nada\n' + origin]) {
     const res = check(extra)
-    t.is(res.status, 1, 'a CDN origin with no ranges is refused')
-    t.ok(res.log.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em ' + s.p('etc/varanda.env')), 'says what is missing')
+    t.is(res.status, 1, 'a CDN origin with no ranges and no secret is refused')
+    t.ok(res.log.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES ou VARANDA_CDN_SECRET em ' + s.p('etc/varanda.env')), 'says what is missing')
   }
   t.is(check(CDN + origin).status, 0, 'with both set it passes')
   t.is(check(CDN).status, 0, 'ranges without an origin pass')
+  const secretOnly = check('VARANDA_CDN_SECRET=' + SECRET_A + '\n' + origin)
+  t.is(secretOnly.status, 0, 'the secret alone, with no ranges, passes: ' + secretOnly.log)
+  t.absent((secretOnly.log + secretOnly.out).includes(SECRET_A), 'and is never printed')
+})
+
+// The CDN secret (X-Varanda-Edge): empty, or exactly 64 lowercase hex digits,
+// the same rule as deploy.sh. A refusal names the variable, never the value.
+test('update.sh: conferir_env accepts an empty or 64-hex VARANDA_CDN_SECRET, refuses anything else and never prints it', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  const check = (extra) => {
+    s.write('etc/varanda.env', FULL_ENV + extra)
+    return s.run(MAIN + 'comecar teste\nconferir_env')
+  }
+  for (const extra of ['', 'VARANDA_CDN_SECRET=\n', 'VARANDA_CDN_SECRET=' + SECRET_A + '\n', 'VARANDA_CDN_SECRET=' + SECRET_A + ' # Bunny\n', 'VARANDA_CDN_SECRET = ' + SECRET_B + '\n']) {
+    const res = check(extra)
+    t.is(res.status, 0, JSON.stringify(extra) + ' passes: ' + res.log)
+    t.absent((res.log + res.out).includes(SECRET_A) || (res.log + res.out).includes(SECRET_B), 'nothing prints the secret')
+  }
+  for (const bad of [SECRET_A.toUpperCase(), SECRET_A.slice(1), SECRET_A + '0', SECRET_A.slice(1) + 'g', '"' + SECRET_A + '"', SECRET_A.slice(0, 32) + ' ' + SECRET_A.slice(32)]) {
+    const res = check('VARANDA_CDN_SECRET=' + bad + '\n')
+    t.is(res.status, 1, 'a malformed secret is refused')
+    t.ok(res.log.includes('VARANDA_CDN_SECRET inválido em ' + s.p('etc/varanda.env')), 'says which variable')
+    t.absent((res.log + res.out).includes(SECRET_A.slice(1, 40)), 'and never prints the value')
+  }
 })
 
 // docker compose reads the env file with its own parser, which also takes
@@ -3744,7 +3773,9 @@ test('update.sh: conferir_env refuses a line that names the CDN variables in a f
     ['VARANDA_TRUSTED_PROXIES: 0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
     ['VARANDA_TRUSTED_PROXIES : 203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
     ['export VARANDA_MEDIA_ORIGIN=' + origin, 'VARANDA_MEDIA_ORIGIN'],
-    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN']
+    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN'],
+    ['export VARANDA_CDN_SECRET=' + SECRET_A, 'VARANDA_CDN_SECRET'],
+    ['VARANDA_CDN_SECRET: ' + SECRET_A, 'VARANDA_CDN_SECRET']
   ]) {
     for (const extra of [line + '\n', CDN + line + '\n']) {
       const res = check(extra)
@@ -3760,25 +3791,26 @@ test('update.sh: conferir_env refuses a line that names the CDN variables in a f
 // docker compose prefers a variable exported in the invoking shell to the env
 // file, so an inherited VARANDA_TRUSTED_PROXIES would skip the validation above.
 // The harness runs update.sh's own top level, so the inherited value is observable.
-test('update.sh: does not hand an inherited VARANDA_TRUSTED_PROXIES or VARANDA_MEDIA_ORIGIN to docker compose', (t) => {
+test('update.sh: does not hand an inherited VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN or VARANDA_CDN_SECRET to docker compose', (t) => {
   if (!hasBash(t)) return
   const s = server(t)
-  const keep = { p: process.env.VARANDA_TRUSTED_PROXIES, m: process.env.VARANDA_MEDIA_ORIGIN }
+  const keep = { p: process.env.VARANDA_TRUSTED_PROXIES, m: process.env.VARANDA_MEDIA_ORIGIN, c: process.env.VARANDA_CDN_SECRET }
   process.env.VARANDA_TRUSTED_PROXIES = '0.0.0.0/0'
   process.env.VARANDA_MEDIA_ORIGIN = 'https://x.exemplo.org'
+  process.env.VARANDA_CDN_SECRET = SECRET_A
   let res
   try {
-    res = s.run('printf "%s|%s" "${VARANDA_TRUSTED_PROXIES-unset}" "${VARANDA_MEDIA_ORIGIN-unset}" > "$state/herdadas.out"') // eslint-disable-line no-template-curly-in-string
+    res = s.run('printf "%s|%s|%s" "${VARANDA_TRUSTED_PROXIES-unset}" "${VARANDA_MEDIA_ORIGIN-unset}" "${VARANDA_CDN_SECRET-unset}" > "$state/herdadas.out"') // eslint-disable-line no-template-curly-in-string
   } finally {
-    for (const [k, v] of [['VARANDA_TRUSTED_PROXIES', keep.p], ['VARANDA_MEDIA_ORIGIN', keep.m]]) {
+    for (const [k, v] of [['VARANDA_TRUSTED_PROXIES', keep.p], ['VARANDA_MEDIA_ORIGIN', keep.m], ['VARANDA_CDN_SECRET', keep.c]]) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
     }
   }
   t.is(res.status, 0, 'runs: ' + res.out)
-  t.is(s.read('state/herdadas.out'), 'unset|unset', 'neither inherited variable survives the script top level')
+  t.is(s.read('state/herdadas.out'), 'unset|unset|unset', 'no inherited CDN variable survives the script top level')
   const code = fs.readFileSync(SCRIPT, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
-  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)\b/.test(l)), 'nothing reads either variable from the environment')
+  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN|CDN_SECRET)\b/.test(l)), 'nothing reads any of them from the environment')
 })
 
 // The probe after a way back expects the body the restored Caddy serves: the

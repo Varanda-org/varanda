@@ -83,8 +83,12 @@ services:
       # cabeçalhos de encaminhamento (só em /media/*; as outras rotas usam o
       # endereço da conexão). VARANDA_MEDIA_ORIGIN: a origem https que
       # serve /media/*, aceita no CSP e anunciada em /varanda.json.
+      # VARANDA_CDN_SECRET: o segredo que um CDN sem intervalos fixos (o
+      # Bunny) manda no cabeçalho X-Varanda-Edge; o Caddyfile o lê a cada
+      # pedido de /media/* e só então confia no X-Real-Ip.
       VARANDA_TRUSTED_PROXIES: "${VARANDA_TRUSTED_PROXIES:-}"
       VARANDA_MEDIA_ORIGIN: "${VARANDA_MEDIA_ORIGIN:-}"
+      VARANDA_CDN_SECRET: "${VARANDA_CDN_SECRET:-}"
     volumes:
       # Sem as variáveis (deploy.sh e o compose à mão), ./Caddyfile e ./www.
       # O update.sh, com a imagem do Caddy, passa caminhos fixos em

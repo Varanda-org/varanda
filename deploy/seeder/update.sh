@@ -36,12 +36,12 @@ set -Eeuo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
-# Estas duas variáveis vêm só do deploy/seeder/.env, que este script confere.
+# Estas três variáveis vêm só do deploy/seeder/.env, que este script confere.
 # O docker compose prefere uma variável exportada no shell de quem chamou ao
 # valor do .env: sem o unset, um VARANDA_TRUSTED_PROXIES herdado (0.0.0.0/0)
 # chegaria ao Caddy sem passar pela conferência. Nada abaixo as lê do ambiente
 # (o build do app as recebe explicitamente, já conferidas).
-unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN
+unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN VARANDA_CDN_SECRET
 # Uma sessão SSH que cai não interrompe uma troca pela metade.
 trap '' HUP PIPE
 
@@ -155,6 +155,10 @@ media_origin=''
 # (VARANDA_TRUSTED_PROXIES, opcional), separados por espaço. Vazio: ninguém é
 # de confiança.
 trusted_proxies=''
+# O segredo que um CDN sem intervalos fixos (o Bunny) manda no cabeçalho
+# X-Varanda-Edge (VARANDA_CDN_SECRET, opcional): 64 hex minúsculos. Vazio:
+# nenhum pedido é tratado como vindo do CDN. Nunca impresso.
+cdn_secret=''
 # Preenchidos por ler_associacoes e lidos por gravar_associacoes (well-known.sh).
 # shellcheck disable=SC2034
 android_cert=''
@@ -739,7 +743,7 @@ conferir_env_web() {
   # Só NOME=valor: o docker compose lê o .env com o próprio parser, que
   # também aceita "export NOME=valor" e "NOME: valor". A conferência abaixo
   # (sed) veria vazio, pularia as regras e o Caddy receberia o texto cru.
-  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES; do
+  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES VARANDA_CDN_SECRET; do
     if [ -n "$(grep -E "^[[:space:]]*(export[[:space:]]+)?$nome_cdn([^A-Za-z0-9_]|\$)" "$env_file" | grep -Ev "^[[:space:]]*$nome_cdn[[:space:]]*=")" ]; then
       log "$nome_cdn em $env_file fora do formato NOME=valor (sem export e sem ':'): o docker compose leria um valor que este script não confere"
       return 1
@@ -817,11 +821,20 @@ conferir_env_web() {
       return 1
     fi
   fi
-  # Um CDN na frente de /media/* sem os CIDRs dele: todo pedido chegaria com o
-  # endereço de um servidor do CDN, e os limites por endereço (um por cliente)
-  # virariam um limite só para todos.
-  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ]; then
-    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em $env_file: sem os CIDRs do CDN, todos os clientes de /media/* dividiriam um só limite por endereço"
+  # O segredo do CDN (X-Varanda-Edge): opcional (vazio desliga), e exatamente
+  # 64 dígitos hexadecimais minúsculos (openssl rand -hex 32). O valor nunca
+  # vai para o registro, nem numa recusa: a mensagem só diz o formato.
+  cdn_secret=$(sed -n 's/^[[:space:]]*VARANDA_CDN_SECRET[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$cdn_secret" ] && ! [[ $cdn_secret =~ ^[0-9a-f]{64}$ ]]; then
+    log "VARANDA_CDN_SECRET inválido em $env_file: só 64 dígitos hexadecimais minúsculos (openssl rand -hex 32)"
+    return 1
+  fi
+  # Um CDN na frente de /media/* sem os CIDRs dele nem o segredo: todo pedido
+  # chegaria com o endereço de um servidor do CDN, e os limites por endereço
+  # (um por cliente) virariam um limite só para todos.
+  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ] && [ -z "$cdn_secret" ]; then
+    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES ou VARANDA_CDN_SECRET em $env_file: sem os CIDRs do CDN ou o segredo, todos os clientes de /media/* dividiriam um só limite por endereço"
     return 1
   fi
   # O cliente OAuth: só se estão vazios; o valor nunca vai para o registro.
