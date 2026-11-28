@@ -1728,11 +1728,16 @@ test('Caddyfile: /media/* drops the client address headers and keeps the upstrea
   // Only with VARANDA_MEDIA_ORIGIN, and only by rewriting the seeder's own
   // value (adding s-maxage for the edge): the handle never sets a header of
   // its own, so without the variable the upstream cache header goes through.
-  const cacheLines = media.split('\n').filter((l) => l.includes('Cache-Control'))
+  // The pre-check route answers on its own, no-store, and never reaches the
+  // seeder, so it is left out of what the proxied responses get.
+  const pre = media.indexOf('\t\thandle @conferencia {')
+  t.ok(pre !== -1, 'the pre-check handle inside /media/*')
+  const proxied = media.slice(0, pre) + media.slice(media.indexOf('\n\t\t}', pre) + 4)
+  const cacheLines = proxied.split('\n').filter((l) => l.includes('Cache-Control'))
   t.is(cacheLines.length, 1, 'one Cache-Control line in the /media/* handle')
   t.ok(/^\s*header @comMidia >Cache-Control "\^\(public, max-age=31536000, immutable\)\$" "\$1, s-maxage=60"$/.test(cacheLines[0]),
     'it only appends s-maxage to the upstream value, and only with the media origin')
-  t.absent(media.replace(cacheLines[0], '').includes('immutable'), 'nothing else in the /media/* handle sets a cache header')
+  t.absent(proxied.replace(cacheLines[0], '').includes('immutable'), 'nothing else in the /media/* handle sets a cache header')
 })
 
 test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned and restorable', (t) => {

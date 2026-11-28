@@ -662,6 +662,47 @@
 				window 10s
 			}
 		}
+		# A conferência do Bunny (scripts/bunny-precheck.js, passos em
+		# docs/cdn.md): antes de pôr VARANDA_MEDIA_ORIGIN, é preciso ver na
+		# origem de verdade que o CDN manda no X-Real-Ip e no X-Forwarded-For
+		# o endereço de quem pediu, mande este o que mandar. Os mesmos três
+		# matchers do limite escolhem a resposta, que diz a zona e a chave
+		# exatas que o limite usa; sem o segredo, só a zona e a chave do
+		# próprio pedido. O Caddy responde sozinho: nunca mostra o segredo,
+		# não chega ao semeador, não registra nada e responde no-store. Na
+		# ordem do topo do arquivo o rate_limit vem depois do handle, então
+		# este caminho não gasta a janela de mídia.
+		# Só responde a quem manda X-Varanda-Precheck: 1. Um link ou uma
+		# imagem nunca mandam esse cabeçalho, e uma página de outro site só o
+		# manda depois de uma checagem CORS que esta origem nunca aceita.
+		# Assim o endereço de uma visita atraída até o caminho nunca entra
+		# numa resposta que o CDN guarde (a regra do Bunny guarda /media/* por
+		# 60 s, mesmo com no-store). Sem o cabeçalho, o pedido vai ao semeador
+		# como qualquer caminho de mídia.
+		@conferencia {
+			path /media/precheck-*
+			header X-Varanda-Precheck 1
+		}
+		handle @conferencia {
+			header Cache-Control "no-store"
+			header Content-Type "text/plain; charset=utf-8"
+			respond @viaCdn <<TXT
+				zona: media-cdn
+				chave: {header.X-Real-Ip}
+				x-real-ip: {header.X-Real-Ip}
+				x-forwarded-for: {header.X-Forwarded-For}
+				TXT 200
+			respond @viaCdnSemEndereco <<TXT
+				zona: media-cdn-borda
+				chave: {remote_host}
+				x-real-ip: {header.X-Real-Ip}
+				x-forwarded-for: {header.X-Forwarded-For}
+				TXT 200
+			respond <<TXT
+				zona: media
+				chave: {client_ip}
+				TXT 200
+		}
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
 			header_up -X-Varanda-Edge
