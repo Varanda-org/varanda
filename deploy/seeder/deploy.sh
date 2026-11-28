@@ -27,12 +27,12 @@ set -Eeuo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
-# Estas duas variáveis vêm só do deploy/seeder/.env, que este script confere.
+# Estas três variáveis vêm só do deploy/seeder/.env, que este script confere.
 # O docker compose prefere uma variável exportada no shell de quem chamou ao
 # valor do .env: sem o unset, um VARANDA_TRUSTED_PROXIES herdado (0.0.0.0/0)
 # chegaria ao Caddy sem passar pela conferência. Nada abaixo as lê do ambiente
 # (o build do app as recebe explicitamente, já conferidas).
-unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN
+unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN VARANDA_CDN_SECRET
 # Se a conexão SSH cair, a implantação segue até o fim (ou até a volta): um
 # deploy pela metade é pior que um deploy sem ninguém olhando.
 trap '' HUP PIPE
@@ -78,6 +78,10 @@ media_origin=''
 # (VARANDA_TRUSTED_PROXIES, opcional), separados por espaço. Vazio: ninguém é
 # de confiança.
 trusted_proxies=''
+# O segredo que um CDN sem intervalos fixos (o Bunny) manda no cabeçalho
+# X-Varanda-Edge (VARANDA_CDN_SECRET, opcional): 64 hex minúsculos. Vazio:
+# nenhum pedido é tratado como vindo do CDN. Nunca impresso.
+cdn_secret=''
 # As associações do app nativo (passkeys com rpId = o domínio) e a build da
 # Google Play, conferidas em conferir_antes e gravadas em www por
 # publicar_web. Vazio: arquivo ausente.
@@ -150,18 +154,21 @@ conteiner_caddy() {
     --filter label=com.docker.compose.oneoff=False
 }
 
-# O Caddy só lê VARANDA_TRUSTED_PROXIES e VARANDA_MEDIA_ORIGIN ao iniciar, e
-# um deploy do mesmo commit não sobe nada: esta função diz se o contêiner web
-# que roda tem as duas iguais às de deploy/seeder/.env (já conferido, em
-# $trusted_proxies e $media_origin). Uma variável ausente no contêiner vale
-# vazia. Sem contêiner, ou se o docker falha, diz que não (recria).
+# O Caddy só lê VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN e
+# VARANDA_CDN_SECRET do ambiente com que o contêiner subiu, e um deploy do
+# mesmo commit não sobe nada: esta função diz se o contêiner web que roda tem
+# as três iguais às de deploy/seeder/.env (já conferido, em $trusted_proxies,
+# $media_origin e $cdn_secret). Uma variável ausente no contêiner vale vazia.
+# Sem contêiner, ou se o docker falha, diz que não (recria). O segredo só é
+# comparado, nunca impresso.
 web_com_env_atual() {
   local id atual
   id=$(conteiner_caddy | head -n 1) || return 1
   [ -n "$id" ] || return 1
   atual=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id") || return 1
   [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_TRUSTED_PROXIES=//p' | tail -n 1)" = "$trusted_proxies" ] &&
-    [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_MEDIA_ORIGIN=//p' | tail -n 1)" = "$media_origin" ]
+    [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_MEDIA_ORIGIN=//p' | tail -n 1)" = "$media_origin" ] &&
+    [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_CDN_SECRET=//p' | tail -n 1)" = "$cdn_secret" ]
 }
 
 # Numa falha, quem chamou já viu as linhas de log(); a saída crua do build e
@@ -441,7 +448,7 @@ conferir_antes() {
   # Só NOME=valor: o docker compose lê o .env com o próprio parser, que
   # também aceita "export NOME=valor" e "NOME: valor". A conferência abaixo
   # (sed) veria vazio, pularia as regras e o Caddy receberia o texto cru.
-  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES; do
+  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES VARANDA_CDN_SECRET; do
     if [ -n "$(grep -E "^[[:space:]]*(export[[:space:]]+)?$nome_cdn([^A-Za-z0-9_]|\$)" "$env_file" | grep -Ev "^[[:space:]]*$nome_cdn[[:space:]]*=")" ]; then
       log "$nome_cdn em deploy/seeder/.env fora do formato NOME=valor (sem export e sem ':'): o docker compose leria um valor que este script não confere"
       exit 1
@@ -521,11 +528,20 @@ conferir_antes() {
       exit 1
     fi
   fi
-  # Um CDN na frente de /media/* sem os CIDRs dele: todo pedido chegaria com o
-  # endereço de um servidor do CDN, e os limites por endereço (um por cliente)
-  # virariam um limite só para todos.
-  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ]; then
-    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em deploy/seeder/.env: sem os CIDRs do CDN, todos os clientes de /media/* dividiriam um só limite por endereço"
+  # O segredo do CDN (X-Varanda-Edge): opcional (vazio desliga), e exatamente
+  # 64 dígitos hexadecimais minúsculos (openssl rand -hex 32). O valor nunca
+  # vai para o registro, nem numa recusa: a mensagem só diz o formato.
+  cdn_secret=$(sed -n 's/^[[:space:]]*VARANDA_CDN_SECRET[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$cdn_secret" ] && ! [[ $cdn_secret =~ ^[0-9a-f]{64}$ ]]; then
+    log "VARANDA_CDN_SECRET inválido em deploy/seeder/.env: só 64 dígitos hexadecimais minúsculos (openssl rand -hex 32)"
+    exit 1
+  fi
+  # Um CDN na frente de /media/* sem os CIDRs dele nem o segredo: todo pedido
+  # chegaria com o endereço de um servidor do CDN, e os limites por endereço
+  # (um por cliente) virariam um limite só para todos.
+  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ] && [ -z "$cdn_secret" ]; then
+    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES ou VARANDA_CDN_SECRET em deploy/seeder/.env: sem os CIDRs do CDN ou o segredo, todos os clientes de /media/* dividiriam um só limite por endereço"
     exit 1
   fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
@@ -1074,12 +1090,13 @@ main() {
   if [ "$sem_registro" = 0 ] && [ "$previous" = "$target" ] \
     && [ "$(git rev-parse HEAD)" = "$target" ]; then
     if verificar_saude; then
-      # O Caddy só lê VARANDA_TRUSTED_PROXIES e VARANDA_MEDIA_ORIGIN ao
-      # iniciar: uma troca delas em .env também vale sem um commit novo, mas
-      # só com o web recriado (o resto não muda). O Caddy novo é sondado de
-      # novo, e uma falha aqui não troca mais nada.
+      # O Caddy só lê VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN e
+      # VARANDA_CDN_SECRET do ambiente com que subiu: uma troca delas em .env
+      # também vale sem um commit novo, mas só com o web recriado (o resto
+      # não muda). O Caddy novo é sondado de novo, e uma falha aqui não troca
+      # mais nada.
       if ! web_com_env_atual; then
-        log "já implantado $target e saudável, mas o web roda com outro VARANDA_TRUSTED_PROXIES ou VARANDA_MEDIA_ORIGIN: recriando o web"
+        log "já implantado $target e saudável, mas o web roda com outro VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN ou VARANDA_CDN_SECRET: recriando o web"
         if ! compose up -d --force-recreate --no-deps web || ! verificar_saude; then
           log "o web recriado não passou na verificação de saúde"
           exit 1

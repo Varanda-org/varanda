@@ -186,12 +186,32 @@ function clearMemory () {
   }
 }
 
+// Forgets the memory entries holding one of `uris` (kept files a keep-only
+// deleted) and restarts the loads, so none stores a file read just before.
+// A cache that cannot (no restartLoads or forgetUrl, or a throw) is cleared.
+function forgetKept (uris) {
+  if (uris.length === 0) return
+  for (const cache of memoryCaches) {
+    try {
+      cache.restartLoads()
+      for (const uri of uris) cache.forgetUrl(uri)
+    } catch {
+      try { cache.clear() } catch {}
+    }
+  }
+}
+
 // Wires the kept store into range revocation (../media/cache.js) and the
 // local cache registry (../localCaches.js), once per run whatever the number
 // of callers. Each caller also hands its in-memory URL cache (`cache`): a
-// wipe, an author drop or a keep-only clears it whole, since post keys carry
-// no author, so no entry keeps answering with a deleted kept file. A range
-// revoke needs nothing here: revokeMedia already drops those entries.
+// wipe or an author drop clears it whole, since post keys carry no author,
+// so no entry keeps answering with a deleted kept file. A keep-only (the
+// follow list arriving) forgets only the entries holding a file the store
+// says it deleted: clearing would release the URLs already on screen (a
+// revoked blob: URL or a deleted transient file draws a blank photo). A
+// store that answers a promise (the web) hands out no file URI, so there is
+// nothing to forget; one that cannot say (no list) gets the whole clear. A
+// range revoke needs nothing here: revokeMedia already drops those entries.
 // Clearing releases the URLs through the cache's revoke, which ignores kept
 // files. A URL the cache evicts (or clears) releases the kept file's in-use
 // mark, so the store's trim may delete it again. -> true when this call
@@ -220,8 +240,10 @@ export function registerKeptStore ({ onRevokedRanges, bumpCacheGeneration, regis
       clearMemory()
     },
     keepOnlyAuthors (allowed) {
-      store.keepOnlyKeptAuthors(allowed)
-      clearMemory()
+      let deleted = null
+      try { deleted = store.keepOnlyKeptAuthors(allowed) } catch {}
+      if (Array.isArray(deleted)) forgetKept(deleted.filter((uri) => typeof uri === 'string'))
+      else if (!deleted || typeof deleted.then !== 'function') clearMemory()
     }
   })
   return true

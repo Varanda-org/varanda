@@ -183,7 +183,7 @@ h1 {
 }
 .botao--cheio { background: var(--tinta); color: var(--creme); }
 .botao--cheio:hover { background: #2e3d34; }
-/* the App Store button is the main way in on an iPhone: larger and darker than every other button */
+/* the App Store and Google Play buttons are the main way in on a phone: larger and darker than every other button */
 .botao--loja {
   flex-direction: column;
   align-items: center;

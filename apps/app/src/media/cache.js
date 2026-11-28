@@ -129,10 +129,10 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   // Bumped when ranges are freed. A load samples it at schedule time so a
   // key revoked while it is still queued is never fetched.
   let generation = 0
-  // Bumped by clear(). A load that was already running when the cache was
-  // cleared may hand back what the purge just removed (a kept file a wipe or
-  // an author drop deleted after loadKept read it): it is not stored and
-  // runs once more.
+  // Bumped by clear() and restartLoads(). A load that was already running
+  // then may hand back what the purge just removed (a kept file a wipe, an
+  // author drop or a keep-only deleted after loadKept read it): it is not
+  // stored and runs once more.
   let clears = 0
   // fn(url) for each URL let go by LRU eviction, replacement or clear(),
   // never by a range revoke: ./keptLoad.js releases the kept file's in-use
@@ -314,6 +314,14 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     }
   }
 
+  // What clear() does to loads, with every stored URL kept: for a purge that
+  // deleted only some kept files (./keptLoad.js keep-only), whose entries are
+  // forgotten one by one (forgetUrl).
+  const restartLoads = () => {
+    clears++
+    for (const job of prefetches.values()) job.cancel()
+  }
+
   // Lets go of `url` when it is still what `key` holds (a shown URL that no
   // longer renders): released and reported like an eviction. Unlike a range
   // revoke the key is not blocked, so the next get loads it again.
@@ -370,6 +378,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     prefetch,
     peek,
     clear,
+    restartLoads,
     forget,
     forgetUrl,
     onEvicted,

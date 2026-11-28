@@ -471,12 +471,24 @@ export function dropKeptAuthors (keys) {
 // keys; an empty one deletes everything). Anything that is not an iterable
 // is ignored rather than read as "nobody". The peek kinds hold strangers by
 // design, so a follow reconcile leaves them to retainKept and the purges.
+// -> the URIs of the kept files it set out to delete, which ./keptLoad.js
+// forgets in memory (one whose delete it could not confirm too: forgetting
+// costs only a reload; a leftover .tmp or .old was never handed out), or
+// null when it failed part way.
 export function keepOnlyKeptAuthors (allowed) {
   try {
     const keepSet = authorSet(allowed)
-    if (keepSet === null) return
-    for (const k of listKept(MAIN_KINDS)) if (!keepSet.has(k.author)) dropEntry(k)
-  } catch {}
+    if (keepSet === null) return []
+    const gone = []
+    for (const k of listKept(MAIN_KINDS)) {
+      if (keepSet.has(k.author)) continue
+      if (!k.tmp) gone.push(k.file.uri)
+      dropEntry(k)
+    }
+    return gone
+  } catch {
+    return null
+  }
 }
 
 // Deletes every file of `kinds` (an array of kind names) that `entries`
