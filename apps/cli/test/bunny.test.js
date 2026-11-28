@@ -56,8 +56,9 @@ function newZone (id, name, origin = '') {
 // to a wrong AccessKey. state.inject = { method, path, status, json } answers
 // the next matching request with that error; state.ignore names settings a
 // POST /pullzone/{id} silently drops, so a read-back can disagree.
+// state.listLag hides a zone from that many list responses right after create.
 async function fakeBunny (t, key) {
-  const state = { zones: [], requests: [], nextId: 100, inject: null, ignore: new Set() }
+  const state = { zones: [], requests: [], nextId: 100, inject: null, ignore: new Set(), listLag: 0, hidden: new Map() }
   const server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', (c) => { raw += c })
@@ -87,13 +88,22 @@ async function fakeBunny (t, key) {
       let m
       if (req.method === 'GET' && u.pathname === '/pullzone') {
         const s = u.searchParams.get('search') || ''
-        return send(200, state.zones.filter((z) => z.Name.includes(s)))
+        return send(200, state.zones.filter((z) => {
+          const left = state.hidden.get(z.Id)
+          if (left > 0) {
+            state.hidden.set(z.Id, left - 1)
+            return false
+          }
+          return z.Name.includes(s)
+        }))
       }
       if (req.method === 'POST' && u.pathname === '/pullzone') {
         if (!body || typeof body.OriginUrl !== 'string' || body.OriginUrl === '') {
           return send(400, { ErrorKey: 'pullzone.origin_url_required', Field: 'OriginUrl', Message: 'The Origin URL is required when creating a pull zone with origin type OriginUrl.' })
         }
-        state.zones.push(newZone(state.nextId++, body.Name, body.OriginUrl))
+        const newId = state.nextId++
+        state.zones.push(newZone(newId, body.Name, body.OriginUrl))
+        if (state.listLag > 0) state.hidden.set(newId, state.listLag)
         return send(201)
       }
       if (req.method === 'GET' && u.pathname === '/pullzone/loadFreeCertificate') {
@@ -324,6 +334,76 @@ test('bunny: a run that stops right after the create leaves a zone that reaches 
   t.is(fake.zones.length, 1, 'no second zone')
   t.is(z.OriginUrl, ORIGIN, 'the real origin is set')
   t.alike(z.EdgeRules.map((r) => r.Description).sort(), [bunny.RULE_SECRET, bunny.RULE_MEDIA, bunny.RULE_CACHE].sort(), 'the three rules are in')
+})
+
+// Runs apply in process so the waits go to a fake sleep instead of a timer.
+async function applyWithFakeSleep (t, { key, secret, fake, full }) {
+  const waits = []
+  const lines = []
+  const sink = { write: (s) => lines.push(s) }
+  const code = await bunny.main(['apply', ...full], {
+    env: { VARANDA_BUNNY_API: fake.base, BUNNY_API_KEY: key },
+    stdout: sink,
+    stderr: sink,
+    sleep: async (ms) => { waits.push(ms) }
+  })
+  const text = lines.join('')
+  t.absent(text.includes(key), 'no key in the output')
+  t.absent(text.includes(secret), 'no secret in the output')
+  return { code, waits, lines, text }
+}
+
+const ALL_WAITS = [1000, 2000, 4000, 8000, 15000]
+
+for (const [lag, waited] of [[2, [1000, 2000]], [ALL_WAITS.length, ALL_WAITS]]) {
+  test('bunny: apply waits out a list that lags the create by ' + lag + ' lookups and then finishes the zone', async (t) => {
+    const s = await setup(t)
+    const { fake } = s
+    fake.listLag = lag
+    const { code, waits, lines } = await applyWithFakeSleep(t, s)
+    t.is(code, 0)
+    t.alike(waits, waited)
+    t.is(lines.filter((l) => l.includes('esperando até 30 s')).length, 1)
+    t.is(fake.zones.length, 1)
+    const writes = fake.writes()
+    t.alike(writes.map((r) => r.path), [
+      '/pullzone',
+      '/pullzone/100/edgerules/addOrUpdate',
+      '/pullzone/100/edgerules/addOrUpdate',
+      '/pullzone/100/edgerules/addOrUpdate',
+      '/pullzone/100',
+      '/pullzone/100/addHostname'
+    ], 'one create, and the rules still go in before the origin')
+    t.is(writes[1]?.body.Description, bunny.RULE_MEDIA, 'the block rule is still the first write after the create')
+    t.is(fake.zones[0].OriginUrl, ORIGIN)
+  })
+}
+
+test('bunny: apply gives up when the new zone stays off the list, and writes nothing else', async (t) => {
+  const s = await setup(t)
+  const { fake } = s
+  fake.listLag = 99
+  const { code, waits, text } = await applyWithFakeSleep(t, s)
+  t.is(code, 1)
+  t.alike(waits, ALL_WAITS)
+  t.ok(text.includes('Rode plan em instantes'), 'it says to run plan first')
+  t.absent(text.includes('com segurança'), 'no plain "run apply again" advice')
+  t.alike(fake.writes().map((r) => [r.method, r.path]), [['POST', '/pullzone']])
+  t.is(fake.zones.length, 1)
+  t.is(fake.zones[0].OriginUrl, bunny.CREATE_ORIGIN)
+})
+
+test('bunny: a failed lookup after the create also says to run plan first', async (t) => {
+  const s = await setup(t)
+  const { fake } = s
+  // Only a zone that exists is read by id, so this fails the first lookup after the create.
+  fake.inject = { method: 'GET', path: /^\/pullzone\/\d+$/, status: 503, json: { ErrorKey: 'busy', Message: 'later' } }
+  const { code, waits, text } = await applyWithFakeSleep(t, s)
+  t.is(code, 1)
+  t.alike(waits, [], 'a failed lookup does not wait')
+  t.ok(text.includes('A zona foi criada. Rode plan em instantes'), text)
+  t.absent(text.includes('com segurança'), 'no plain "run apply again" advice')
+  t.alike(fake.writes().map((r) => [r.method, r.path]), [['POST', '/pullzone']])
 })
 
 test('bunny: Perma-Cache or a script on the zone stops plan and apply before any write', async (t) => {
