@@ -22,6 +22,23 @@ test('planRowPeeks asks only top rows the node has no profile for, once per scop
   t.alike(planRowPeeks({ ...args, peers: null }), [])
 })
 
+test('saved peer is asked again', async (t) => {
+  const { planRowPeeks } = await load()
+  const peers = [key(1), key(2), key(3)]
+  const named = { name: 'Ana', username: 'ana', bio: null, avatar: null }
+  const profileOf = (peer) => (peer === key(3) ? null : named)
+  const peeked = new Set()
+  const args = { peers, profileOf, isPeeked: (peer) => peeked.has(peer), tried: new Set(), scope: '1:0' }
+  t.alike(planRowPeeks(args), [key(3)], 'without isSaved a saved name reads as named and is never asked')
+  const saved = new Set([key(1)])
+  const isSaved = (peer) => saved.has(peer)
+  t.alike(planRowPeeks({ ...args, isSaved }), [key(1), key(3)], 'a saved peer is asked in this run')
+  peeked.add(key(1))
+  t.alike(planRowPeeks({ ...args, isSaved, tried: new Set() }), [key(3)], 'and no longer once its peek is verified')
+  peeked.add(key(3))
+  t.alike(planRowPeeks({ ...args, isSaved, tried: new Set() }), [], 'a verified peek is never asked, missing or not')
+})
+
 test('runRowPeeks reads one at a time, learns only verified entries and never repeats', async (t) => {
   const { planRowPeeks, runRowPeeks } = await load()
   const { PEER_GONE } = await import('../src/peerProfile.js')

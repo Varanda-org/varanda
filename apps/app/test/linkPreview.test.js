@@ -92,7 +92,7 @@ test('PostRow draws a music player only from the stored card', (t) => {
   t.is([...quote.matchAll(/embedOf\(/g)].length, 1, 'only the stored quote URL is inspected')
   t.ok(quote.includes("return !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string' ? embedOf(q.preview.url) : null"))
   t.ok(quote.includes('const embed = quotePlayerOf(q)'), 'QuoteCard uses the shared player rule')
-  t.ok(/embed !== null\s*\? <MusicEmbedCard embed=\{embed\} card=\{q\.preview\} thumb=\{\{ kind: 'post', author: q\.author, persist: q\.persist === true \}\}/.test(quote))
+  t.ok(/embed !== null\s*\? <MusicEmbedCard embed=\{embed\} card=\{q\.preview\} thumb=\{\{ kind: 'post', author: q\.author, persist: persistMode\(q\.persist\) \}\}/.test(quote))
   t.ok(quote.includes('<LinkCard card={q.preview}'), 'other quoted links keep the static card')
 })
 

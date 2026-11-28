@@ -579,3 +579,62 @@ test('peek prefetch uses only the bounded store after blocks are known', async t
     wipeLocalCaches()
   }
 })
+
+test('the lane passes a copy policy through unchanged', async t => {
+  const { createThumbnailPrefetch } = await load()
+  const { options, flush } = await fixture()
+  const policies = []
+  const lane = createThumbnailPrefetch({
+    ...options,
+    cache: { prefetch: () => () => {} },
+    load: (author, d, persist) => { policies.push(persist); return () => {} }
+  })
+  lane.update({ rows: [{}, { ...rows[0], persist: 'copy' }], lastVisible: 0 })
+  await flush()
+  t.alike(policies, ['copy'], 'a row policy')
+  lane.cancel()
+  policies.length = 0
+  lane.update({ rows: [{}, rows[0]], lastVisible: 0, persistOf: () => 'copy' })
+  await flush()
+  t.alike(policies, ['copy'], 'a screen policy')
+  lane.cancel()
+})
+
+test('copy prefetch: loadKept picks the kind, the HTTP cache only for a followed author', async t => {
+  const { setAllowedAuthors, noteBlocksKnown, wipeEpoch, dropAuthors, wipeLocalCaches } = await import('../src/localCaches.js')
+  const author = rows[0].author
+  const stranger = 'c'.repeat(64)
+  const d = descriptor(1)
+  wipeLocalCaches()
+  setAllowedAuthors([author])
+  try {
+    const followed = await loadFixture()
+    t.is(await followed.build(author, d, 'copy')(), 'file:kept')
+    t.alike(followed.calls.read.map(args => args[0]), ['posts'], 'a followed author reads the main kind first')
+    t.is(followed.calls.keep[0]?.[0], 'posts', 'and keeps there')
+    t.is(followed.calls.fetch[0][2].persist, true, 'a followed author may use the HTTP cache')
+
+    const early = await loadFixture()
+    t.is(await early.build(stranger, d, 'copy')(), 'blob:bytes')
+    t.alike(early.calls.read.map(args => args[0]), ['posts'], 'no copy read before a block list is known')
+    t.is(early.calls.keep.length, 0, 'no copy keep before block.list')
+    t.is(early.calls.fetch[0][2].persist, false, 'a stranger never reaches the HTTP cache')
+
+    noteBlocksKnown(wipeEpoch())
+    const kept = await loadFixture({ keptUrl: (kind) => { kept.calls.read.push([kind]); return kind === 'copyPosts' ? 'file:copy' : null } })
+    t.is(await kept.build(stranger, d, 'copy')(), 'file:copy', 'a copy-kind hit answers once blocks are known')
+    t.is(kept.calls.fetch.length, 0, 'at no network cost')
+
+    const fresh = await loadFixture()
+    t.is(await fresh.build(stranger, d, 'copy')(), 'file:kept')
+    t.is(fresh.calls.keep[0]?.[0], 'copyPosts', 'a stranger keeps only to the copy kind')
+    t.is(fresh.calls.fetch[0][2].persist, false, 'still no HTTP cache')
+
+    dropAuthors([stranger])
+    const blocked = await loadFixture({ keptUrl: () => 'file:blocked' })
+    t.is(await blocked.build(stranger, d, 'copy')(), 'blob:bytes', 'a denied author is never answered from disk')
+    t.is(blocked.calls.keep.length, 0, 'nor kept')
+  } finally {
+    wipeLocalCaches()
+  }
+})

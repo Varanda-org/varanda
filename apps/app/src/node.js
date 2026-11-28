@@ -143,6 +143,7 @@ import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effec
 import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
+import { listsLine, openLines, trimLines, withoutOpenLines } from './openLine'
 import { createIdleTracker } from './idle'
 import { createRequestQueue, notSent } from './requestQueue'
 import { createAttempts } from './attempts'
@@ -154,6 +155,8 @@ import { accountStatus, recoveryFetch } from './account'
 import { settleSignIn } from './emptyAccount'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { shouldWipeOnStart, wipeLocalCaches } from './localCaches'
+import { clearPushLists } from './pushBlocks'
+import * as localCaches from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
 import { clearMusicRecents } from './musicRecentsStore'
@@ -201,8 +204,7 @@ const RECOVERY_TIMEOUT_MS = 30000
 const MISSING_OP_TEXT = 'este aparelho ainda não tem essa função; atualize o Varanda'
 
 function appendLine (prev, line) {
-  const lines = prev.lines.concat([line])
-  return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
+  return { ...prev, lines: trimLines(prev.lines.concat([line]), MAX_SYNC_LINES) }
 }
 
 const NodeContext = createContext(null)
@@ -518,6 +520,7 @@ function LiveNodeProvider ({ children }) {
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
+  const openRef = useRef(null)
   const requestQueueRef = useRef(null)
   const setConnection = useCallback((conn) => {
     if (connRef.current === conn) return
@@ -539,6 +542,8 @@ function LiveNodeProvider ({ children }) {
     const key = st && typeof st.publicKey === 'string' && st.publicKey !== '' ? st.publicKey : null
     if (key === null) return
     if (ownerRef.current !== null && ownerRef.current !== key) wipeLocalCaches()
+    // The web worker's block and mute lists were the previous owner's.
+    if (ownerRef.current !== null && ownerRef.current !== key) clearPushLists()
     ownerRef.current = key
   }, [])
 
@@ -882,6 +887,8 @@ function LiveNodeProvider ({ children }) {
     // start one (a restart or reconnect awaiting the old close calls in here
     // later), and one that finishes after it is dropped.
     if (isCrashed()) return
+    let startedAt = Date.now()
+    const opening = { startedAt, answeredAt: null, ready: false }
     // Native, the installation's own configuration (the web kind): hosted
     // only once that connection is ready; a failure is the retry screen.
     const nativeHosted = cfg !== null && typeof cfg === 'object' && cfg.kind === 'hosted'
@@ -913,6 +920,9 @@ function LiveNodeProvider ({ children }) {
       // unlocked, so the app must be active now.
       await whenActive()
       if (obsolete()) return
+      // Time spent waiting for the app to become active is not open time.
+      startedAt = Date.now()
+      opening.startedAt = startedAt
       const conn = await connectNode(cfg, {
         onEvent,
         onClose: ({ code }) => {
@@ -928,6 +938,7 @@ function LiveNodeProvider ({ children }) {
       })
       holder.conn = conn
       if (obsolete()) return drop(conn)
+      openRef.current = opening
       setConnection(conn)
       setInfoOrigin(undefined)
       if (save && cfg) {
@@ -953,6 +964,7 @@ function LiveNodeProvider ({ children }) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err); pkFailed = true }
         if (obsolete()) return drop(conn)
       }
+      const statusAt = Date.now()
       marks.mark('identity.status')
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
@@ -960,13 +972,23 @@ function LiveNodeProvider ({ children }) {
       setMediaVideo(identity !== null && conn.media != null && conn.media.video === true)
       setCoreRead(identity === null && conn.media != null && typeof conn.media.read === 'function')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
+      const beforeWipe = localCaches.wipeEpoch()
       noteOwner(pk)
       if (shouldWipeOnStart(pk, pkFailed)) wipeLocalCaches()
+      const wiped = localCaches.wipeEpoch() !== beforeWipe
       setPkStatus(pk)
       setPkError(pkErr)
       bumpGeneration()
       setConfig(cfg)
       if (nativeHosted) setHosted(true)
+      const readyAt = Date.now()
+      const lines = openLines({ startedAt, statusAt, readyAt, wiped })
+      const earlyListsLine = listsLine(startedAt, opening.answeredAt)
+      if (earlyListsLine !== null) lines.unshift(earlyListsLine)
+      opening.ready = true
+      setSync((prev) => lines.reduce((state, line) => appendLine(state, 'aviso: ' + line), {
+        ...prev, lines: withoutOpenLines(prev.lines)
+      }))
       setPhase('ready')
       marks.mark('ready')
     } catch (err) {
@@ -1119,6 +1141,7 @@ function LiveNodeProvider ({ children }) {
   const forgetConfig = useCallback(async () => {
     // The configuration (and with it the installation) is going away.
     wipeLocalCaches()
+    clearPushLists()
     // Also the path of an installation change (Conexao saves it, then calls
     // this): the older attempt's connect and revalidation become obsolete.
     attemptsRef.current.begin()
@@ -1197,6 +1220,17 @@ function LiveNodeProvider ({ children }) {
       if (method !== 'sync.start') {
         const pending = conn.request(method, params)
         pending.then(done, done)
+        if (method === 'block.list') {
+          const opening = openRef.current
+          pending.then(() => {
+            if (opening === null || opening.answeredAt !== null || connRef.current !== conn || openRef.current !== opening) return
+            opening.answeredAt = Date.now()
+            // A reply during connect goes in the same update as the opening lines.
+            if (!opening.ready) return
+            const line = listsLine(opening.startedAt, opening.answeredAt)
+            if (line !== null) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+          }, () => {})
+        }
         if (waiting) pending.then(extendWait, extendWait)
         return pending
       }
@@ -1277,9 +1311,11 @@ function LiveNodeProvider ({ children }) {
     // So were the recent music picks; synchronous, gone before the dispatch.
     if (name === 'signOut' || name === 'reset') clearMusicRecents()
     let pending
+    // The operation that actually ran, which the success path needs too.
+    let op = name
     try {
       // A node script without signOut (an older build) locks instead.
-      const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
+      op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
       if (typeof conn.identity[op] !== 'function') throw recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')
       pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
@@ -1298,6 +1334,10 @@ function LiveNodeProvider ({ children }) {
         const added = name === 'complete' && pendingKind === 'add' && addedOnly(result)
         const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
         if (changed) setEmptyCardKey(null)
+        // The account left the device, so its lists leave the web worker.
+        // Only after a success: a failed sign-out keeps its pushes quiet, and
+        // so does the lock an older node runs for Sair, which keeps the session.
+        if (op === 'signOut' || op === 'reset') clearPushLists()
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {

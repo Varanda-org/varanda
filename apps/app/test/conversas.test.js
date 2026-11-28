@@ -574,18 +574,21 @@ test('group images survive the conversation projection without community inherit
   t.ok(ui.includes('pictureProps(item)'), 'row validates the pair at the Avatar boundary')
 })
 
-test('new group snapshots omit image descriptors and authors', async (t) => {
+test('a public group snapshot keeps its image pair, a community snapshot omits it', async (t) => {
   const { buildScreenSnapshot } = await import('../src/screenSnapshot.js')
   const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
   const row = { group: 'c'.repeat(64), community: 'd'.repeat(64), role: 'member', visibility: 'public', state: 'ready', name: 'Leitura', image, imageAuthor: 'e'.repeat(64) }
   const binding = { origin: 'https://example.test', association: 'f'.repeat(64), owner: 'a'.repeat(64), acting: { kind: 'me' } }
-  for (const kind of ['conversasGrupos', 'comunidades']) {
-    const snapshot = buildScreenSnapshot(kind, { ...binding, rows: [row] })
-    t.ok(snapshot)
-    t.is(snapshot.body.rows.length, 1)
-    t.absent(Object.hasOwn(snapshot.body.rows[0], 'image'))
-    t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
-  }
+  const grupos = buildScreenSnapshot('conversasGrupos', { ...binding, rows: [row] })
+  t.ok(grupos)
+  t.is(grupos.body.rows.length, 1)
+  t.alike(grupos.body.rows[0].image, image)
+  t.is(grupos.body.rows[0].imageAuthor, 'e'.repeat(64))
+  const comunidades = buildScreenSnapshot('comunidades', { ...binding, rows: [row] })
+  t.ok(comunidades)
+  t.is(comunidades.body.rows.length, 1)
+  t.absent(Object.hasOwn(comunidades.body.rows[0], 'image'))
+  t.absent(Object.hasOwn(comunidades.body.rows[0], 'imageAuthor'))
 })
 
 test('private group images stay in live rows and are stripped before storage', async (t) => {
@@ -611,7 +614,7 @@ test('private group images stay in live rows and are stripped before storage', a
   t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
   t.is(snapshot.body.rows[0].name, null, 'private name stays out too')
   const source = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
-  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)"), 'the save boundary strips private images')
+  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', { ...snapshotBinding, blocked: blockedRef.current }, rowsForStorage(all), cacheGen)"), 'the save boundary strips private images')
   t.ok(source.includes('visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor'), 'live rows keep visibility through the screen')
   t.alike(pictureProps({ ...row, image: { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: B, width: 512, height: 512 } }), { picture: null, mediaAuthor: null }, 'private rows never display a public descriptor')
 })

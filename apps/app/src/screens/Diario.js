@@ -23,10 +23,13 @@
 // Snapshot (../screenSnapshot.js, kind 'diario'): the last fresh first page
 // of the own diary is painted at once on the next mount, with loadedAt left
 // null so the first live read still runs and verifies the rows in its span.
+// log.read asks for publications only (`posts`); a first page that still
+// shows none (an older core node) keeps the stored copy until the bounded
+// fill finds one, and saves the verified rows down to it.
 // Only while acting as the member, never in the Vitrine.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
@@ -85,14 +88,14 @@ import { useFollowCounts } from '../useFollowCounts'
 import { LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
-import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
+import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, ownDeletions, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
 import { EditPostSheet } from '../ui/EditPostSheet'
 import { editedRecord } from '../postEdit'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { useMoments, useMomentSeen } from './Momentos'
 import { useBlocks } from '../blocksProvider'
-import { cacheGeneration } from '../localCaches'
+import { cacheGeneration, deniedAuthor, wipeEpoch } from '../localCaches'
 import { actingAsMember, buildScreenSnapshot } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
@@ -113,14 +116,16 @@ const SNAPSHOT_DEBOUNCE_MS = 2000
 // older live pages appended later are not under the stored rows' rule) and
 // `oldest` (the next `before`: the page's technical records were not kept, so
 // the last row does not bound it).
-// `social` is a useSocial seed with the stored originals only.
+// `social` is a useSocial seed with the stored originals only; `names` the
+// stored names of the originals' authors as names.seedMany pairs.
 export function diarioSeed (snapshot) {
   if (snapshot === null || snapshot.body.rows.length === 0) return null
   const b = snapshot.body
   const rows = b.rows.map((r) => ({ seq: r.seq, entry: { seq: r.seq, record: r.record } }))
   return {
     data: { info: { publicKey: snapshot.owner }, rows, atEnd: b.atEnd, oldest: b.oldest, seeded: true, stored: new Set(rows.map((r) => r.seq)) },
-    social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] }
+    social: { originals: Object.entries(b.originals), counts: new Map(), liked: [], reposted: [] },
+    names: (Array.isArray(b.names) ? b.names : []).map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }])
   }
 }
 
@@ -329,6 +334,117 @@ export function diarioSnapshotAction ({ live, seeded, holdsDeleted, deletionPend
   return deletionPending ? 'clear' : null
 }
 
+// What a save does with the built snapshot: 'save', 'clear' or 'keep' (no
+// write). `shown`: the publications the source rows show. A page with none
+// never overwrites the stored copy unless the whole diary was read, and a page
+// with some never clears it because the build painted none of them.
+export function diarioSnapshotWrite ({ built, shown, atEnd }) {
+  const paints = built !== null && built !== undefined &&
+    built.body.rows.some((r) => r.record.type === 'post' || r.record.on === true)
+  if (shown > 0) return paints ? 'save' : 'keep'
+  return atEnd === true ? 'clear' : 'keep'
+}
+
+// Whether a save armed with `gen` may run now: 'current', 'retry' (a prune
+// or block change bumped the generation during the delay: the build filters
+// by the lists of the flush, so it runs once more as a fresh save) or 'drop'
+// (a wipe since the page was read, or the retry was spent).
+export function diarioSaveTiming ({ gen, retried, liveGen, liveWipe, generation, wipe }) {
+  if (liveWipe !== wipe) return 'drop'
+  if (gen === generation && (liveGen === gen || retried === true)) return 'current'
+  return retried === true || gen === generation ? 'drop' : 'retry'
+}
+
+// The save a first live page arms once its read is done: { gen, retried },
+// or null after a deletion, here (`deletions`) or on any screen (`own`),
+// since the read began, as the rows may still hold the post. A purge alone
+// (the generation moved while the read ran) arms a retried save at the
+// current generation: its rows go through purgedRows and the build filters
+// under the lists of the flush, and a wipe or a later bump drops it.
+export function firstPageSave ({ deletions, deletionsNow, own, ownNow, gen, generation }) {
+  if (deletions !== deletionsNow || own !== ownNow) return null
+  return gen === generation ? { gen, retried: false } : { gen: generation, retried: true }
+}
+
+// The rows that show a publication: posts and the reposts still on. A save
+// builds from these, so repost-offs never fill the snapshot's row cap.
+export function publicationRows (rows, held) {
+  const live = liveReposts(rows, held)
+  return rows.filter((row) => isPostRow(row) || (isRepostRow(row) && live.has(row.seq)))
+}
+
+export function publicationCount (rows, held) {
+  return publicationRows(rows, held).length
+}
+
+// The rows a save builds from: the first live page, or, when it shows no
+// publication, the newest rows the node verified since (the older pages
+// loadOlder appended to `data`, held rows on top). Rows below `data.oldest`
+// are still the stored copy's.
+export function diarioSnapshotSource (live, data) {
+  if (publicationCount(live.rows, null) > 0 || data === null || data === undefined || data.info.publicKey !== live.info.publicKey) return live
+  const verified = data.seeded === true
+    ? data.rows.filter((row) => typeof data.oldest === 'number' && row.seq >= data.oldest)
+    : data.rows
+  return { ...live, rows: (data.held ?? []).concat(verified), atEnd: data.atEnd === true && data.seeded !== true }
+}
+
+// The rows of the copy on disk (`seededRows`, as the screen started with
+// them) without those this run superseded: a row the live reads settled away,
+// a repost a newer loaded record turned off, a post the originals lookup found
+// deleted. null when none was. A kept copy is rewritten from these, so it
+// never paints what the live read already took back.
+export function storedCopyRows (seededRows, data, originalOf) {
+  if (!Array.isArray(seededRows) || data === null || data === undefined) return null
+  const bySeq = new Map(data.rows.map((row) => [row.seq, row]))
+  const live = liveReposts(data.rows, data.held)
+  const gone = deletedStoredSeqs(data.rows, data.stored, data.info.publicKey, originalOf)
+  const kept = []
+  for (const was of seededRows) {
+    const row = bySeq.get(was.seq)
+    if (row === undefined || !row.entry || gone.has(row.seq)) continue
+    if (isRepostRow(row) && row.entry.record.on === true && !live.has(row.seq)) continue
+    kept.push(row)
+  }
+  return kept.length === seededRows.length ? null : kept
+}
+
+// Whether an older page settled a save that found nothing to store: its
+// rows now show a publication, or the whole diary was read (a clear).
+export function fillSettled (source) {
+  return publicationCount(source.rows, null) > 0 || source.atEnd === true
+}
+
+// `rows` without the own reposts of another author that `allowed` now
+// refuses (a denied one: the stored copy keeps a stranger's original, so a
+// follow change drops nothing): a retried save writes rows read before a
+// block, and the build filters only the originals. As the stored copy's purge
+// (screenSnapshot.js prune), an own quote post stays: only its quoted
+// original goes.
+export function purgedRows (rows, owner, allowed) {
+  const own = owner.toLowerCase()
+  return rows.filter((row) => {
+    const record = row.entry && row.entry.record
+    if (!record || record.type !== 'repost') return true
+    const author = record.to && typeof record.to.author === 'string' ? record.to.author.toLowerCase() : null
+    return author === null || author === own || allowed(author)
+  })
+}
+
+// 'more' while no publication is shown, older pages remain and fewer than
+// `cap` were read for this first page; else 'full', 'end' or 'capped'.
+export function publicationsFill ({ shown, atEnd, pages, cap = 4 }) {
+  if (shown > 0) return 'full'
+  if (atEnd === true) return 'end'
+  if (pages >= cap) return 'capped'
+  return 'more'
+}
+
+// A core node older than log.read's `posts` refuses it.
+export function isUnknownParam (err) {
+  return !!err && err.code === 'USAGE' && err.message === 'parâmetro desconhecido'
+}
+
 // What a page of own rows needs: counts and own state of the own posts and
 // the originals of the reposts; originals and quoted posts to resolve; the
 // parents of own replies (useSocial reads only strangers' ones).
@@ -471,49 +587,98 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const deletedSeqsRef = useRef(new Set())
   const liveMarkedRef = useRef(false)
   const latestRef = useRef(null)
-  latestRef.current = { binding, acting, passkey: node.passkey, originals: social.social.originals, persistOf: social.persistOf, blocked: blocks.keys }
-  const writeSnapshot = useCallback((gen) => {
+  latestRef.current = { binding, acting, passkey: node.passkey, originals: social.social.originals, persistOf: social.persistOf, blocked: blocks.keys, profileOf }
+  // A save found no publication to store before the end of the diary: the
+  // older page that first brings one arms it again.
+  const fillSaveRef = useRef(false)
+  // The rows the copy on disk holds while it is still the boot seed (or its
+  // rewrite), and this run's data still settles them; null once a save, a
+  // clear or a replacing read took that away.
+  const seedRowsRef = useRef(boot === null ? null : boot.data.rows)
+  const writeSnapshot = useCallback((gen, retried) => {
     snapshotTimer.current = null
     const l = latestRef.current
     const live = liveRef.current
     if (l.binding === null) return
     const deletions = deletionsRef.current
+    const deletionPending = deletions !== writtenDeletionsRef.current
+    let source = live === null ? null : diarioSnapshotSource(live, dataRef.current)
+    if (source !== null && retried === true) source = { ...source, rows: purgedRows(source.rows, l.binding.owner, (a) => !deniedAuthor(a)) }
+    const timing = live === null ? 'drop' : diarioSaveTiming({ gen, retried, liveGen: live.gen, liveWipe: live.wipe, generation: cacheGeneration(), wipe: wipeEpoch() })
+    const allowed = live !== null && actingAsMember(l.acting) && sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner) &&
+      sameSnapshotBinding(live.binding, l.binding) && typeof live.info.publicKey === 'string' && live.info.publicKey.toLowerCase() === l.binding.owner
     // A deletion before the first live page invalidates the stored copy. A
     // deletion arms this timer and then bumps the generation, and it can arm
     // after a wipe whose live page predates it: only a save is refused then.
     const action = diarioSnapshotAction({
       live: live !== null,
       seeded: dataRef.current?.seeded === true,
-      holdsDeleted: live !== null && holdsDeleted(live.rows, deletedSeqsRef.current),
-      deletionPending: deletions !== writtenDeletionsRef.current,
-      allowed: live !== null && actingAsMember(l.acting) && sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner) &&
-        sameSnapshotBinding(live.binding, l.binding) && typeof live.info.publicKey === 'string' && live.info.publicKey.toLowerCase() === l.binding.owner,
-      current: live !== null && gen === cacheGeneration() && live.gen === gen
+      holdsDeleted: source !== null && holdsDeleted(source.rows, deletedSeqsRef.current),
+      deletionPending,
+      allowed,
+      current: timing === 'current'
     })
-    if (action === null) return
-    writtenDeletionsRef.current = deletions
+    if (action === null) {
+      // Not after a deletion since the read: the rows may still hold it.
+      if (timing === 'retry' && allowed && live.deletions === deletions && live.ownDeletions === ownDeletions()) {
+        const next = cacheGeneration()
+        snapshotTimer.current = setTimeout(() => writeSnapshot(next, true), SNAPSHOT_DEBOUNCE_MS)
+      }
+      return
+    }
     if (action === 'clear') {
+      writtenDeletionsRef.current = deletions
+      seedRowsRef.current = null
       clearScreenSnapshot('diario')
       return
     }
     const snapshot = buildScreenSnapshot('diario', {
       ...l.binding,
       acting: l.acting,
-      log: diarioLogOf(live, l.binding.owner),
+      log: diarioLogOf({ ...source, rows: publicationRows(source.rows, null) }, l.binding.owner),
       originals: l.originals,
       followed: l.persistOf,
-      blocked: l.blocked
+      blocked: l.blocked,
+      profileOf: l.profileOf
     })
-    // An empty first page leaves nothing to paint, not the old rows.
-    if (snapshot === null) clearScreenSnapshot('diario')
-    else saveScreenSnapshot('diario', snapshot, gen)
+    const write = diarioSnapshotWrite({ built: snapshot, shown: publicationCount(source.rows, null), atEnd: source.atEnd })
+    // A pending deletion still clears: the stored copy may hold the post.
+    if (write === 'keep' && !deletionPending) {
+      fillSaveRef.current = true
+      const trimmed = storedCopyRows(seedRowsRef.current, dataRef.current, (ref) => l.originals.get(ref))
+      if (trimmed === null) return
+      const rows = purgedRows(trimmed, l.binding.owner, (a) => !deniedAuthor(a))
+      const copy = buildScreenSnapshot('diario', {
+        ...l.binding,
+        acting: l.acting,
+        log: diarioLogOf({ rows: publicationRows(rows, null), atEnd: false }, l.binding.owner),
+        originals: l.originals,
+        followed: l.persistOf,
+        blocked: l.blocked,
+        profileOf: l.profileOf
+      })
+      const save = diarioSnapshotWrite({ built: copy, shown: publicationCount(rows, null), atEnd: false }) === 'save'
+      seedRowsRef.current = save ? rows : null
+      if (save) saveScreenSnapshot('diario', copy, gen)
+      else clearScreenSnapshot('diario')
+      return
+    }
+    writtenDeletionsRef.current = deletions
+    seedRowsRef.current = null
+    if (write === 'save') saveScreenSnapshot('diario', snapshot, gen)
+    else clearScreenSnapshot('diario')
   }, [])
-  const armSnapshot = useCallback((gen) => {
+  const armSnapshot = useCallback((gen, retried = false) => {
     if (latestRef.current.binding === null) return
     clearTimeout(snapshotTimer.current)
-    snapshotTimer.current = setTimeout(() => writeSnapshot(gen), SNAPSHOT_DEBOUNCE_MS)
+    snapshotTimer.current = setTimeout(() => writeSnapshot(gen, retried), SNAPSHOT_DEBOUNCE_MS)
   }, [writeSnapshot])
   useEffect(() => () => clearTimeout(snapshotTimer.current), [])
+  // The stored strangers' names, before the first paint, only for authors the
+  // cache does not know; the live rows still read the profiles.
+  useLayoutEffect(() => {
+    if (boot !== null && boot.names.length > 0) names.seedMany(boot.names)
+  }, [])
   useEffect(() => {
     if (boot !== null) perfMarks().mark('rows-snapshot:diario')
   }, [])
@@ -584,11 +749,32 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     return publicGroupsVersionRef.current
   }, [refresh, pulls, active, groupVersions])
   const publicGroups = usePublicGroups(ownPublicKey, { enabled: node.hosted === true, version: publicGroupsVersion })
+  // node.epoch at which log.read refused `posts`: the pages are read without
+  // it, technical records included, until the epoch moves. Only the read is
+  // repeated.
+  const plainLogEpochRef = useRef(null)
+  const readLog = useCallback(async (params) => {
+    const epoch = identityRef.current.epoch
+    if (plainLogEpochRef.current !== epoch) {
+      try {
+        return await request('log.read', { ...params, posts: true })
+      } catch (err) {
+        if (!isUnknownParam(err)) throw err
+        plainLogEpochRef.current = epoch
+      }
+    }
+    return request('log.read', params)
+  }, [request])
+  // Older pages read for the first page while it shows no publication.
+  const postsPages = useRef(0)
   // Replaces the rows with the newest page (a refresh), except the first
   // read over a seed, which settles the painted rows instead.
   const loadNewest = useCallback(async (refreshProfile = false, replace = false) => {
     const mine = ++seqRef.current
     const deletions = deletionsRef.current
+    // Deletions on any screen (noteDeleted): a retried save never writes rows
+    // read before one.
+    const anyDeletions = ownDeletions()
     // The rows are as fresh as the start of the read: a write that lands
     // while it runs may be missing, so it must still count as newer.
     const startedAt = Date.now()
@@ -617,7 +803,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       }
       const readBinding = latestRef.current.binding
       const gen = cacheGeneration()
-      const log = await request('log.read', { limit: LOG_LIMIT_MAX })
+      const wipe = wipeEpoch()
+      const log = await readLog({ limit: LOG_LIMIT_MAX })
       // The node can switch identity a round trip before the epoch moves
       // (passkeyOp re-reads the status first): log.read names the diary it
       // read, so a reused key that is not that diary's is read again.
@@ -628,13 +815,17 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       // The older pages are gone with the replaced rows: the Mural fill
       // budget starts over with them.
       muralPages.current = 0
+      postsPages.current = 0
+      fillSaveRef.current = false
       const atEnd = isLastLogPage(log)
       const live = { info, rows, atEnd, oldest: oldestSeq(rows) }
       const seeded = !replace && dataRef.current?.seeded === true && liveRef.current === null &&
         dataRef.current.info.publicKey === info.publicKey && sameSnapshotBinding(seedBindingRef.current, latestRef.current.binding)
         ? dataRef.current
         : null
-      liveRef.current = { ...live, gen, binding: readBinding }
+      liveRef.current = { ...live, gen, wipe, deletions, ownDeletions: anyDeletions, binding: readBinding }
+      // A read that replaces the rows no longer settles the copy on disk.
+      if (seeded === null) seedRowsRef.current = null
       let next = live
       let held = false
       const settled = seeded === null ? null : firstLivePage(seeded, live)
@@ -650,8 +841,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         liveMarkedRef.current = true
         perfMarks().mark('rows-live:diario')
       }
-      // A post deleted while this page was read may still be on it.
-      if (deletions === deletionsRef.current && cacheGeneration() === gen) armSnapshot(gen)
+      const save = firstPageSave({ deletions, deletionsNow: deletionsRef.current, own: anyDeletions, ownNow: ownDeletions(), gen, generation: cacheGeneration() })
+      if (save !== null) armSnapshot(save.gen, save.retried)
       setLoadError('')
       setOlderError('')
       setLoadingMore(false)
@@ -676,7 +867,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         setNewestLoading(false)
       }
     }
-  }, [request, ackFresh, resolve, invalidate, ingest, armSnapshot])
+  }, [request, readLog, ackFresh, resolve, invalidate, ingest, armSnapshot])
 
   // Appends the next older page; never while one is loading.
   const loadOlder = useCallback(async () => {
@@ -688,7 +879,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     setOlderError('')
     try {
       const before = current.oldest ?? oldestSeq(current.rows)
-      const log = await request('log.read', { limit: LOG_LIMIT_MAX, before })
+      const log = await readLog({ limit: LOG_LIMIT_MAX, before })
       // The cursor came from `current`: a newest page that replaced it
       // meanwhile would leave a gap between the two. A deletion also replaces
       // it, so a stale page must not restore the deleted content.
@@ -696,6 +887,11 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       const { page, data: next } = olderPageData(current, log, before)
       dataRef.current = next
       setData(next)
+      const live = liveRef.current
+      if (fillSaveRef.current && live !== null && fillSettled(diarioSnapshotSource(live, next))) {
+        fillSaveRef.current = false
+        armSnapshot(live.gen)
+      }
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
@@ -710,7 +906,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         olderBusy.current = false
       }
     }
-  }, [request, resolve, ingest])
+  }, [readLog, resolve, ingest, armSnapshot])
 
   // The own-diary growth signal at this render: an activation that is about
   // to acknowledge it re-reads the profile too, or a change made on another
@@ -772,6 +968,19 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     muralPages.current += 1
     loadOlder()
   }, [mural, data, loadingMore, newestLoading, olderError, muralFill, loadOlder])
+  // Same bounded fill for Publicações: a first page with no publication (a
+  // diary topped by likes or repost-offs on an older node) reads up to `cap`
+  // older pages before it offers 'Carregar mais'.
+  const postsFill = data === null ? 'end' : publicationsFill({ shown: posts.length, atEnd: data.atEnd, pages: postsPages.current, cap: 4 })
+  useEffect(() => {
+    if (shownTab !== 'posts') return
+    if (data === null || loadingMore || newestLoading || olderError) return
+    if (postsFill !== 'more') return
+    const current = dataRef.current
+    if (current === null || current.atEnd || olderBusy.current || newestBusy.current) return
+    postsPages.current += 1
+    loadOlder()
+  }, [shownTab, data, loadingMore, newestLoading, olderError, postsFill, loadOlder])
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
@@ -988,16 +1197,21 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     : null
 
   // Before the first answer, and for an empty log, under the header.
+  const skeleton = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   let empty
   if (data === null) {
     empty = loadError
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
-      : <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
+      : skeleton
   } else {
+    // Older pages remain and none shown so far held a publication: never a
+    // blank list nor the empty state.
     empty = !data.atEnd
-      // Older pages remain and none shown so far held a publication: loading
-      // (or its error and retry), never the empty state.
-      ? <ListFooter loading={loadingMore} atEnd={false} error={olderError} onRetry={loadOlder} pending={loadingMore} />
+      ? olderError
+        ? <ErrorState message={olderError} onRetry={loadOlder} pending={loadingMore} />
+        : loadingMore || newestLoading || postsFill === 'more'
+          ? skeleton
+          : <View style={styles.loadMore}><Pill label='Carregar mais' onPress={loadOlder} /></View>
       : (
         <EmptyState
           icon='lapis'
@@ -1075,10 +1289,10 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       const repostedBy = { author: info.publicKey, name: 'Você', username: null }
       const post = social.original(ref)
       if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey, strangerPersist: 'copy' })} />
     }
     const post = ownPostOf(info.publicKey, row.seq, record, row.entry.edited)
-    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
+    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey, strangerPersist: 'copy' })} />
   }
 
   const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
@@ -1119,7 +1333,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         contentContainerStyle={pinnedContentStyle({ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }, windowHeight, tabsTop, insets.top + BAR)}
         onRefresh={reload}
         refreshing={pull.pending}
-        onLoadMore={mural || depo ? undefined : loadOlder}
+        // With no publication shown, the bounded fill and 'Carregar mais' are
+        // the only readers: the list's own paging would add its dry pages.
+        onLoadMore={posts.length === 0 || mural || depo ? undefined : loadOlder}
         loadingMore={loadingMore}
         loadMoreError={!!olderError}
         atEnd={data === null || mural || depo ? true : data.atEnd}
@@ -1243,5 +1459,6 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   pendingText: { ...type.postText, color: colors.ink },
   pendingActions: { flexDirection: 'row', gap: 8, marginTop: 6 },
-  pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 }
+  pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 },
+  loadMore: { alignItems: 'center', paddingVertical: space.lg }
 })

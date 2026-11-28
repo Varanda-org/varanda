@@ -1,7 +1,7 @@
 // One row of the unified Conversas list (WhatsApp/Telegram style): avatar (round for
 // a person, rounded square for a group or community) on the left, bold title, one grey preview line, the time at the
 // top right and an unread dot at the bottom right. A person's title comes
-// from the row's own name, then the names cache, then the @username; never
+// from the names cache only (name, then @username), never from the row; never
 // "sem nome" while any of them is known. The own marker (OWN_LABEL) is drawn
 // apart from the preview, never joined to it, so a peer named "Você" never
 // reads as the member.
@@ -22,6 +22,24 @@ import { useStyles } from './ThemeProvider'
 import { space, type } from './theme'
 
 const SIZE = 48
+const HEX64 = /^[0-9a-f]{64}$/
+
+// The Avatar props of a group row's private picture. A live picture
+// (`pictured`, from pictureProps) is its own pair, and the row keeps its
+// plaintext. A row seeded from the stored copy (thumb and thumbAuthor set
+// only by Conversas, never with an image) draws the pair kept before. Any
+// other row, a live one without a picture included, gets none: a removed
+// picture never shows again.
+export function groupThumbProps (item, pictured) {
+  if (pictured && pictured.privateItem) {
+    return { groupThumb: { author: pictured.mediaAuthor, sha: pictured.privateItem.plainSha256 }, keepGroupThumb: true }
+  }
+  if (item && item.image === undefined && item.imageAuthor === undefined && typeof item.thumb === 'string' && HEX64.test(item.thumb) &&
+    typeof item.thumbAuthor === 'string' && HEX64.test(item.thumbAuthor)) {
+    return { groupThumb: { author: item.thumbAuthor, sha: item.thumb }, keepGroupThumb: false }
+  }
+  return { groupThumb: null, keepGroupThumb: false }
+}
 
 // The visible title of a person: the whoOf rule, "Pessoa" when unnamed. The
 // Conversas search compares against this same text.
@@ -31,7 +49,8 @@ export function personTitle (profile) {
 }
 
 // item: { kind: 'dm' | 'group' | 'community', key, name?, username?, preview?,
-// mine?, at?, unread? (boolean or a count) }
+// mine?, at?, unread? (boolean or a count), thumb?, thumbAuthor? (a seeded
+// private group's stored picture pair) }
 export function ConversationRow ({ item, now, onPress }) {
   const styles = useStyles(makeStyles)
   const names = useNames()
@@ -57,6 +76,8 @@ export function ConversationRow ({ item, now, onPress }) {
   const handle = person ? handleLine(profile) : null
   const avatarName = person ? who.avatarName : title
   const avatar = cached && cached.avatar ? cached.avatar : undefined
+  const pictured = person ? null : pictureProps(item)
+  const thumbProps = person ? null : groupThumbProps(item, pictured)
   const time = typeof item.at === 'string' ? relativeTime(item.at, now) : null
   const preview = typeof item.preview === 'string' && item.preview !== '' ? displayText(item.preview) : ''
   const own = preview !== '' && item.mine === true
@@ -75,7 +96,7 @@ export function ConversationRow ({ item, now, onPress }) {
       onPress={onPress}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
-      <Avatar name={avatarName} publicKey={key} size={SIZE} {...(person ? { picture: avatar } : pictureProps(item))} persist={false} shape={person ? 'circle' : 'square'} />
+      <Avatar name={avatarName} publicKey={key} size={SIZE} {...(person ? { picture: avatar } : { ...pictured, ...thumbProps })} persist='copy' shape={person ? 'circle' : 'square'} />
       <View style={styles.body}>
         <View style={styles.line}>
           <Text style={[styles.title, unread && styles.titleUnread]} numberOfLines={1}>{title}</Text>

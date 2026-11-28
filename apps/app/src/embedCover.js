@@ -3,6 +3,8 @@
 // tests. The cover never opens a link: a tap on it does nothing, so the
 // person cannot reach the provider page before the player is there.
 
+import { persistMode } from './media/keptLoad.js'
+
 const ROW_MAX_HEIGHT = 200
 const ROW_INSET = 24
 const STACK_INSET = 24
@@ -25,7 +27,7 @@ export function coverLayout (provider, width, height) {
 // Where the cover's picture comes from, following ./ui/LinkCard.js's choice
 // so the cover shows the same picture the stored card would: the composer's
 // local URI for a draft, a diary post's descriptor, or a chat card's item.
-// Never throws.
+// A post thumb that names no persist is kept, as LinkCard's is. Never throws.
 export function coverSource (props) {
   try {
     const { draft, imageUri, card, thumb } = props
@@ -35,7 +37,7 @@ export function coverSource (props) {
     const image = card && typeof card === 'object' ? card.image : null
     if (!image || typeof image !== 'object' || !thumb || typeof thumb !== 'object') return { kind: 'none' }
     if (thumb.kind === 'post' && typeof thumb.author === 'string') {
-      return { kind: 'post', author: thumb.author, descriptor: image, persist: thumb.persist === 'peek' ? 'peek' : thumb.persist !== false }
+      return { kind: 'post', author: thumb.author, descriptor: image, persist: persistMode(thumb.persist ?? true) }
     }
     if (thumb.kind === 'dm' || thumb.kind === 'group') return { kind: 'chat' }
     return { kind: 'none' }

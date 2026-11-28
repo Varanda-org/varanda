@@ -4,3 +4,7 @@
 export function reportBlocks () {}
 
 export function reportMutes () {}
+
+export function clearPushLists () {}
+
+export function openPushLists () {}

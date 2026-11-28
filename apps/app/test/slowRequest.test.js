@@ -58,6 +58,6 @@ test('node request: times both outcomes and returns the original promise on both
   t.ok(request.indexOf('idle.begin()') >= 0 && request.indexOf('idle.begin()') < request.indexOf('conn.request('))
   t.ok(/const done = \(\) => \{[^}]*idle\.end\(\)/.test(request))
   const helper = source.slice(source.indexOf('function appendLine ('), source.indexOf('\nconst NodeContext'))
-  t.ok(helper.includes('const lines = prev.lines.concat([line])'))
-  t.ok(helper.includes('lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines'))
+  // The cap goes through trimLines, which keeps the pinned open lines.
+  t.ok(helper.includes('trimLines(prev.lines.concat([line]), MAX_SYNC_LINES)'))
 })

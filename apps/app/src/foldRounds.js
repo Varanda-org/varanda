@@ -219,6 +219,23 @@ export function foldOriginalOf (ref, { stored, isTransient, dead, stale, pending
   return pending(ref) ? stale.get(ref) : undefined
 }
 
+// useSocial.original(ref): a repost's original or a reply's parent. `stored`
+// is this epoch's answer and wins, null included; until it comes (or while
+// it failed for a transient reason) the last good copy (`stale`) is shown,
+// so a refresh does not blank a resolved card. Never a stale null: a null
+// would drop a stored own post. Never for a deleted ref or a blocked author,
+// and never before block.list answered for this run (`blocksOk`): the stale
+// copy can hold an original seeded from the stored page, whose author may
+// have been blocked since, and the block list is empty until then.
+export function shownOriginalOf (ref, { stored, isTransient, stale, deleted, isBlocked, blocksOk }) {
+  if (stored !== undefined && !isTransient(stored)) return stored
+  if (typeof ref !== 'string' || blocksOk !== true) return undefined
+  const item = stale instanceof Map ? stale.get(ref) : undefined
+  if (!item || typeof item !== 'object' || isTransient(item)) return undefined
+  if (deleted.has(ref) || isBlocked(authorOf(ref)) || isBlocked(item.author)) return undefined
+  return item
+}
+
 // What a drop of the originals leaves the fold to show while each ref is
 // read again: every post item, and null for each unavailable, deleted or
 // given-up ref; a transient failure is no answer. `prev` (the last drop's

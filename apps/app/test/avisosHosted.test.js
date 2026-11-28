@@ -113,13 +113,36 @@ test('Avisos never gives the unread dot to a row read on another device', (t) =>
 
 test('Avisos completes a missing row photo from the names cache or a hinted peek', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
-  for (const piece of ["from '../names'", 'fetchMembers', 'pickAvatar', 'avatarOf', 'needsAvatar', 'resolveRowAvatars', 'rowAvatarSource(item, avatars[item.key])', 'picture={picture}', 'avatar: picture || null', 'resolveMany(', 'const AVATAR_BATCH = 10', 'persist={false}']) {
+  for (const piece of ["from '../names'", 'fetchMembers', 'pickAvatar', 'avatarOf', 'needsAvatar', 'resolveRowAvatars', 'rowAvatarSource(item, avatars[item.key])', 'picture={picture}', 'avatar: picture || null', 'resolveMany(', 'const AVATAR_BATCH = 10', "persist={persistCopy ? 'copy' : false}"]) {
     t.ok(source.includes(piece), piece)
   }
   t.absent(source.includes('picture={item.avatar}'))
   t.absent(source.includes('avatar: item.avatar'))
   t.absent(/[^a-zA-Z]fetch\(/.test(source), 'no raw fetch call')
   t.absent(source.includes('\u2014'))
+})
+
+test('a row read as a Página keeps its photo out of the copy store', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const { compileFunction } = require('node:vm')
+  const expr = (start, end) => {
+    const a = source.indexOf(start)
+    t.ok(a >= 0, start)
+    if (a < 0) return 'undefined'
+    return source.slice(a + start.length, source.indexOf(end, a + start.length))
+  }
+  const run = (code, env) => compileFunction('return (' + code + ')', Object.keys(env))(...Object.values(env))
+  const pageRows = expr('const pageRows = ', '\n')
+  const passed = expr('persistCopy={', '}\n')
+  const persist = expr('persist={', '} />')
+  const page = 'd'.repeat(64)
+  const rowPersist = (pageKey, prevActing, actingKey) => {
+    const rows = run(pageRows, { pageKey, actingKeyRef: { current: prevActing }, actingKey })
+    return run(persist, { persistCopy: run(passed, { pageRows: rows }) })
+  }
+  t.is(rowPersist(page, page, page), false, 'acting as a Página')
+  t.is(rowPersist(null, page, ''), false, 'the commit after leaving the Página')
+  t.is(rowPersist(null, '', ''), 'copy', 'acting as the member')
 })
 
 test('Avisos marks avatar authors tried only after the batch completed and keeps the cache out of its lifetime', (t) => {
@@ -471,7 +494,8 @@ test('the Seguir de volta pill is only for the person, only for someone not foll
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   // A list cleared only in the acting effect still holds the page's rows for
   // one commit after a switch back to the person: no pill until it is cleared.
-  t.ok(source.includes('followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}'))
+  t.ok(source.includes('const pageRows = pageKey !== null || actingKeyRef.current !== actingKey\n'))
+  t.ok(source.includes('followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageRows, follows, ownKey })}'))
   t.ok(/if \(actingKeyRef\.current === actingKey && listBindingRef\.current === bindingKey\) return\n(?:\s*.*\n){0,16}?\s*actingKeyRef\.current = actingKey/.test(source), 'the ref moves only where the list is cleared')
   t.is(source.split('actingKeyRef.current = actingKey').length - 1, 1)
   // The pressed row is the key that is sent.

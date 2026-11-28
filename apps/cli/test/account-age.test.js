@@ -44,6 +44,7 @@ const EMAIL = 'membro@example.test'
 const DOB = '2009-03-14'
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const GOOGLE_URL = 'https://accounts.google.test/auth?state=x'
+const SINCE_CLOCK = '2026-11-04T00:00:00.000Z'
 
 // Any call to the retired Google authorization is visible to the tests.
 function googleStub () {
@@ -98,6 +99,10 @@ async function waitFor (fn, ms = 3000) {
 async function setup (t, { age = true, phone = false, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor, feira = null } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
+  // The since tests record bands on fixed dates in late October 2026, and the
+  // service forgets an unlinked band 30 days after it (AGE_UNLINKED_TTL_MS).
+  // Their clock stays a few days after those dates, whatever day they run.
+  if (since !== undefined) c.offset = Date.parse(SINCE_CLOCK) - Date.now()
   c.now = () => Date.now() + c.offset
   const iss = issuer()
   const store = openAccountStore(dir, { now: c.now, maxMembers })

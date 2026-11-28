@@ -1,7 +1,8 @@
 'use strict'
 
-// A Rua's snapshot rules (src/feedSnapshot.js): what is kept (own and
-// followed authors only), the byte cap, the strict parse and the filters.
+// A Rua's snapshot rules (src/feedSnapshot.js): what is kept (rows of own and
+// followed authors, the originals they reference and those authors' names,
+// never a blocked author), the byte cap, the strict parse and the filters.
 const test = require('brittle')
 
 const { FEED_LIMIT_DEFAULT } = require('@varanda/rpc')
@@ -46,7 +47,7 @@ function fixture () {
     [STRANGER + ':3', post(STRANGER, 3)],
     [STRANGER + ':4', post(STRANGER, 4)],
     [STRANGER + ':7', post(STRANGER, 7)],
-    // A followed original that quotes a stranger: the quote stays out.
+    // A followed original that quotes a stranger: the quote is kept too.
     [OWN + ':2', { ...post(OWN, 2, { quote: { author: STRANGER, seq: 1 } }), avatar: null }],
     [STRANGER + ':1', post(STRANGER, 1)],
     [FOLLOW + ':1', { ...post(FOLLOW, 1), name: 'Bia', avatar }],
@@ -84,7 +85,7 @@ function fixture () {
 
 const ctx = { origin: ORIGIN, association: ASSOC, owner: OWN, now: NOW }
 
-test('build keeps own and followed data only, and round trips', async (t) => {
+test('build keeps own and followed rows with every original they reference (strangers too, not blocked), and round trips', async (t) => {
   const { buildSnapshot, parseSnapshot, SNAPSHOT_VERSION } = await load()
   const s = buildSnapshot(fixture())
   t.ok(s)
@@ -92,10 +93,11 @@ test('build keeps own and followed data only, and round trips', async (t) => {
   t.is(s.savedAt, NOW)
   t.alike(s.items.map((i) => i.author + ':' + i.seq), [OWN + ':50', FOLLOW + ':49', FOLLOW + ':48', FOLLOW + ':47', FOLLOW + ':44', OWN + ':43'], 'blocked author and the repost of a blocked post left out')
   t.alike(s.cursor, { at: at(43), author: OWN, seq: 43 }, 'cursor of the oldest kept row')
-  t.alike(Object.keys(s.originals).sort(), [FOLLOW + ':1', OWN + ':1', OWN + ':2'].sort(), 'no stranger original, quote or reply parent; nothing under a wrong ref')
+  t.alike(Object.keys(s.originals).sort(), [FOLLOW + ':1', OWN + ':1', OWN + ':2', STRANGER + ':3', STRANGER + ':4', STRANGER + ':7', STRANGER + ':1'].sort(), 'stranger quote, reply parent and repost target kept; no blocked original; nothing under a wrong ref')
   t.alike(s.originals[FOLLOW + ':1'].avatar, avatar, 'an original keeps its avatar')
-  t.absent(STRANGER + ':1' in s.originals, 'the quote of a followed original by a stranger is left out')
-  t.alike(Object.keys(s.names).sort(), [OWN, FOLLOW].sort(), 'no stranger or blocked name')
+  t.ok(STRANGER + ':1' in s.originals, 'the quote of a followed original by a stranger is kept, one level further')
+  t.alike(Object.keys(s.names).sort(), [OWN, FOLLOW, STRANGER].sort(), 'the stranger name kept, no blocked name')
+  t.alike(s.names[STRANGER], { name: 'Estranho', username: 'estranho', avatar: null })
   t.alike(s.names[OWN], { name: 'Eu', username: 'eu_mesmo', avatar }, 'no bio')
   t.alike(s.names[FOLLOW], { name: 'Bia', username: 'bia' }, 'unknown avatar stays unknown')
   t.absent(FOLLOW + ':777' in s.counts, 'counts of rows not shown left out')
@@ -260,8 +262,8 @@ test('withoutAuthors drops their rows, reposts of them, names, originals and cou
   const out = withoutAuthors(s, new Set([FOLLOW]))
   t.is(JSON.stringify(s), before, 'the input is untouched')
   t.alike(out.items.map((i) => i.author + ':' + i.seq), [OWN + ':50', OWN + ':43'])
-  t.alike(Object.keys(out.names), [OWN])
-  t.alike(Object.keys(out.originals), [OWN + ':1'])
+  t.alike(Object.keys(out.names).sort(), [OWN, STRANGER].sort(), 'the name of a stranger a kept row quotes stays')
+  t.alike(Object.keys(out.originals).sort(), [OWN + ':1', STRANGER + ':3'].sort(), 'only originals the kept rows reference')
   t.alike(Object.keys(out.counts).sort(), [OWN + ':50', OWN + ':43'].sort())
   t.alike(out.liked, [OWN + ':50'])
   t.alike(out.reposted, [])
@@ -271,13 +273,13 @@ test('withoutAuthors drops their rows, reposts of them, names, originals and cou
   t.alike(noOwnOriginal.items.find((i) => i.kind === 'repost' && i.to.author === OWN), undefined, 'a repost of a removed author goes too')
 })
 
-test('keepOnlyAuthors keeps own rows always and drops originals of others', async (t) => {
+test('keepOnlyAuthors keeps own rows always and only the originals the kept rows reference, whoever wrote them', async (t) => {
   const { buildSnapshot, keepOnlyAuthors } = await load()
   const s = buildSnapshot(fixture())
   const none = keepOnlyAuthors(s, new Set())
   t.alike(none.items.map((i) => i.author + ':' + i.seq), [OWN + ':50', OWN + ':43'], 'own kept')
-  t.alike(Object.keys(none.originals), [OWN + ':1'])
-  t.alike(Object.keys(none.names), [OWN])
+  t.alike(Object.keys(none.originals).sort(), [OWN + ':1', STRANGER + ':3'].sort(), 'the stranger an own row quotes stays; originals of dropped rows go')
+  t.alike(Object.keys(none.names).sort(), [OWN, STRANGER].sort())
   const all = keepOnlyAuthors(s, [FOLLOW])
   t.alike(all, s, 'nothing to drop')
 })
@@ -472,4 +474,146 @@ test('thumbs edge cases: video, array-like, own __proto__, originals, exact limi
   const limits = one(post(OWN, 60, { media: [photo], thumbs: [edge] }))
   t.alike(limits.items[0].thumbs, [edge], '640 px and 65536 bytes are kept')
   t.ok(parseSnapshot(JSON.stringify(limits), ctx), 'and parse')
+})
+
+// One followed row pointing at a stranger, as A Rua holds it.
+function strangerCase (row, extra = {}) {
+  const f = fixture()
+  return {
+    ...f,
+    items: [row],
+    cursor: { at: row.at, author: row.author, seq: row.seq },
+    originals: new Map([[STRANGER + ':5', post(STRANGER, 5, extra)], [BLOCKED + ':6', post(BLOCKED, 6)], [OWN + ':8', post(OWN, 8)]])
+  }
+}
+
+test('a followed row quoting, reposting or replying to a stranger stores that original and its author\'s name', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const cases = [
+    ['quote', post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } })],
+    ['repost', repost(FOLLOW, 60, { author: STRANGER, seq: 5 })],
+    ['reply', post(FOLLOW, 60, { replyTo: { author: STRANGER, seq: 5 } })]
+  ]
+  for (const [label, row] of cases) {
+    const s = buildSnapshot(strangerCase(row))
+    t.alike(s.items.map((i) => i.author + ':' + i.seq), [FOLLOW + ':60'], label + ': the row kept')
+    t.alike(s.originals[STRANGER + ':5'], post(STRANGER, 5), label + ': the stranger original stored')
+    t.alike(s.names[STRANGER], { name: 'Estranho', username: 'estranho', avatar: null }, label + ': the stranger name stored')
+    t.alike(Object.keys(s.originals), [STRANGER + ':5'], label + ': nothing no row references')
+    t.alike(parseSnapshot(JSON.stringify(s), ctx), s, label + ': round trip')
+  }
+})
+
+test('a stranger original is kept one level deep, and never a blocked author\'s', async (t) => {
+  const { buildSnapshot } = await load()
+  // The stranger original quotes another stranger post, which quotes a third.
+  const f = strangerCase(post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } }), { quote: { author: STRANGER, seq: 4 } })
+  f.originals.set(STRANGER + ':4', post(STRANGER, 4, { quote: { author: STRANGER, seq: 3 } }))
+  f.originals.set(STRANGER + ':3', post(STRANGER, 3))
+  const deep = buildSnapshot(f)
+  t.alike(Object.keys(deep.originals).sort(), [STRANGER + ':5', STRANGER + ':4'].sort(), 'the row target and one level further only')
+
+  const blocked = buildSnapshot(strangerCase(post(FOLLOW, 60, { quote: { author: BLOCKED, seq: 6 } })))
+  t.alike(blocked.items.map((i) => i.seq), [60], 'the quoting row stays')
+  t.absent(BLOCKED + ':6' in blocked.originals, 'no blocked original')
+  t.absent(BLOCKED in blocked.names, 'no blocked name')
+  const reply = buildSnapshot(strangerCase(post(FOLLOW, 60, { replyTo: { author: BLOCKED, seq: 6 } })))
+  t.absent(BLOCKED + ':6' in reply.originals, 'no blocked reply parent')
+  t.absent(BLOCKED in reply.names)
+  const second = buildSnapshot(strangerCase(post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } }), { quote: { author: BLOCKED, seq: 6 } }))
+  t.ok(STRANGER + ':5' in second.originals, 'the stranger original stays')
+  t.absent(BLOCKED + ':6' in second.originals, 'what it quotes of a blocked author does not')
+  t.absent(BLOCKED in second.names)
+  const reposted = buildSnapshot({ ...strangerCase(repost(FOLLOW, 61, { author: BLOCKED, seq: 6 })), items: [repost(FOLLOW, 61, { author: BLOCKED, seq: 6 }), post(OWN, 60)] })
+  t.alike(reposted.items.map((i) => i.seq), [60], 'a repost of a blocked post is not a row')
+  t.absent(BLOCKED + ':6' in reposted.originals)
+  t.absent(BLOCKED in reposted.names)
+})
+
+test('withoutAuthors of a stranger removes that original and name and keeps the row that quotes it', async (t) => {
+  const { buildSnapshot, withoutAuthors } = await load()
+  const s = buildSnapshot(strangerCase(post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } })))
+  t.ok(STRANGER + ':5' in s.originals && STRANGER in s.names, 'positive control')
+  const out = withoutAuthors(s, [STRANGER])
+  t.alike(out.items, s.items, 'the quoting row stays')
+  t.absent(STRANGER + ':5' in out.originals, 'the original goes')
+  t.absent(STRANGER in out.names, 'the name goes')
+  t.alike(out.names[FOLLOW], s.names[FOLLOW])
+
+  const r = buildSnapshot(strangerCase(repost(FOLLOW, 60, { author: STRANGER, seq: 5 })))
+  const noRepost = withoutAuthors(r, new Set([STRANGER]))
+  t.alike(noRepost.items, [], 'a repost of the dropped author goes with its original')
+  t.alike(noRepost.originals, {})
+  t.absent(STRANGER in noRepost.names)
+})
+
+test('keepOnlyAuthors keeps a stranger original while the row quoting it stays, and drops it with that row', async (t) => {
+  const { buildSnapshot, keepOnlyAuthors } = await load()
+  const f = strangerCase(post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } }))
+  f.items = [post(FOLLOW, 60, { quote: { author: STRANGER, seq: 5 } }), post(OWN, 59, { replyTo: { author: OWN, seq: 8 } })]
+  const s = buildSnapshot(f)
+  t.ok(STRANGER + ':5' in s.originals && STRANGER in s.names, 'positive control')
+  const still = keepOnlyAuthors(s, new Set([FOLLOW]))
+  t.alike(still, s, 'the follow set without the stranger changes nothing')
+  t.alike(still.originals[STRANGER + ':5'], s.originals[STRANGER + ':5'])
+  const unfollowed = keepOnlyAuthors(s, [])
+  t.alike(unfollowed.items.map((i) => i.author + ':' + i.seq), [OWN + ':59'], 'the quoting row goes with its author')
+  t.absent(STRANGER + ':5' in unfollowed.originals, 'and the stranger original with it')
+  t.absent(STRANGER in unfollowed.names, 'and the stranger name')
+  t.absent(FOLLOW in unfollowed.names)
+  t.alike(Object.keys(unfollowed.originals), [OWN + ':8'])
+})
+
+test('a snapshot stored before strangers\' originals were kept still parses, and its filters still work', async (t) => {
+  const { buildSnapshot, parseSnapshot, keepOnlyAuthors, withoutAuthors } = await load()
+  const s = JSON.parse(JSON.stringify(buildSnapshot(fixture())))
+  for (const ref of Object.keys(s.originals)) if (ref.startsWith(STRANGER)) delete s.originals[ref]
+  delete s.names[STRANGER]
+  const old = parseSnapshot(JSON.stringify(s), ctx)
+  t.alike(old, s, 'the old shape parses as it was')
+  t.alike(keepOnlyAuthors(old, [FOLLOW]), old, 'nothing to drop')
+  t.alike(Object.keys(withoutAuthors(old, [FOLLOW]).originals), [OWN + ':1'])
+})
+
+test('every row pointing at a distinct stranger, one level further too, stays within the parse bounds', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const key = (n) => (n + 16).toString(16).padStart(2, '0').repeat(32)
+  const items = []
+  const originals = new Map()
+  const profiles = new Map()
+  for (let i = 0; i < FEED_LIMIT_DEFAULT; i++) {
+    const a = key(2 * i)
+    const b = key(2 * i + 1)
+    items.push(i % 2 === 0 ? repost(FOLLOW, 500 - i, { author: a, seq: 1 }) : post(FOLLOW, 500 - i, { quote: { author: a, seq: 1 } }))
+    originals.set(a + ':1', post(a, 1, { replyTo: { author: b, seq: 1 } }))
+    originals.set(b + ':1', post(b, 1))
+    profiles.set(a, { name: 'A' + i, username: null, bio: '', avatar: null })
+    profiles.set(b, { name: 'B' + i, username: null, bio: '', avatar: null })
+  }
+  profiles.set(FOLLOW, { name: 'Bia', username: 'bia', bio: '', avatar: null })
+  const last = 501 - FEED_LIMIT_DEFAULT
+  const s = buildSnapshot({ ...fixture(), items, originals, profileOf: (k) => profiles.get(k), cursor: { at: at(last), author: FOLLOW, seq: last } })
+  t.is(s.items.length, FEED_LIMIT_DEFAULT)
+  t.is(Object.keys(s.originals).length, 2 * FEED_LIMIT_DEFAULT)
+  t.is(Object.keys(s.names).length, 2 * FEED_LIMIT_DEFAULT + 1)
+  t.alike(parseSnapshot(JSON.stringify(s), ctx), s, 'round trip')
+})
+
+test('over the cap, stranger originals go with the rows that reference them', async (t) => {
+  const { buildSnapshot, parseSnapshot, SNAPSHOT_MAX_BYTES } = await load()
+  const big = '\ud800'.repeat(2000)
+  const items = []
+  const originals = new Map()
+  for (let i = 0; i < FEED_LIMIT_DEFAULT; i++) {
+    items.push(post(FOLLOW, 1000 - i, { text: big, quote: { author: STRANGER, seq: i + 1 } }))
+    originals.set(STRANGER + ':' + (i + 1), post(STRANGER, i + 1, { text: big }))
+  }
+  const s = buildSnapshot({ ...fixture(), items, originals, cursor: { at: at(974), author: FOLLOW, seq: 974 } })
+  const bytes = Buffer.byteLength(JSON.stringify(s))
+  t.ok(bytes <= SNAPSHOT_MAX_BYTES, 'fits: ' + bytes)
+  const n = s.items.length
+  t.ok(n > 0 && n < FEED_LIMIT_DEFAULT, 'some rows dropped: kept ' + n)
+  t.alike(Object.keys(s.originals).sort(), Array.from({ length: n }, (_, i) => STRANGER + ':' + (i + 1)).sort(), 'only the kept rows\' stranger originals')
+  t.ok(STRANGER in s.names)
+  t.alike(parseSnapshot(JSON.stringify(s), ctx), s)
 })

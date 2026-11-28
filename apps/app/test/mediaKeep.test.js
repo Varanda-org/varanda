@@ -606,20 +606,21 @@ test('trimKept deletes files older than 30 days unless in use', async (t) => {
   t.ok(files().has(shown), 'in use: stays')
 })
 
-test('keep.web: same names; followed kinds and the reconcile stay no-ops', async (t) => {
+test('keep.web: same names; no file URI; only the HTTP cache flag differs', async (t) => {
   const native = await load()
   const web = await import('../src/media/keep.web.js')
   t.alike(Object.keys(web).sort(), Object.keys(native).sort())
   for (const kind of ['posts', 'avatars']) {
-    t.is(web.keep(kind, A, desc(), bytesOf(4)), null)
+    t.is(web.keep(kind, A, desc(), bytesOf(4)), null, 'kept on the web, but no URL handed out')
     t.is(web.keptUrl(kind, A, desc()), null)
-    t.is(web.keptBytes(kind, A, desc()), null)
+    t.is(await web.keptBytes(kind, A, desc()), null, 'read back as bytes (the store is off without IndexedDB)')
   }
   t.is(web.retainKept(['posts', 'avatars'], []), null, 'no peek kind: nothing to retain')
   for (const fn of ['keepOnlyKeptAuthors', 'releaseKept', 'trimKept']) t.is(web[fn](), null)
-  // The peek kinds go to src/media/peekPhotos.web.js: test/peekKeepWeb.test.js.
-  t.is(web.KEEP_MAX_AGE_MS, native.KEEP_MAX_AGE_MS)
-  for (const c of ['KEEP_PEEK_MAX_BYTES', 'KEEP_PEEK_MAX_FILES', 'KEEP_PEEK_MAX_AGE_MS']) t.is(web[c], native[c], c)
+  // The web stores are tested in test/peekKeepWeb.test.js.
+  for (const c of ['KEEP_MAX_BYTES', 'KEEP_MAX_FILES', 'KEEP_MAX_AGE_MS', 'KEEP_PEEK_MAX_BYTES', 'KEEP_PEEK_MAX_FILES', 'KEEP_PEEK_MAX_AGE_MS', 'KEEP_COPY_MAX_BYTES', 'KEEP_COPY_MAX_FILES', 'KEEP_COPY_MAX_AGE_MS']) t.is(web[c], native[c], c)
+  t.is(native.httpCacheKeeps, true, 'native: a followed author may use the HTTP cache')
+  t.is(web.httpCacheKeeps, false, 'web: nothing can purge the browser HTTP cache')
 })
 
 test('peek kinds: separate directories and their own constants', async (t) => {
@@ -765,4 +766,256 @@ test('the first peek use of a start trims the peek kinds once', async (t) => {
   const keep2 = await import('../src/media/keep.native.js?start=b' + Date.now())
   keep2.bindPeek()
   t.absent(files().has(later), 'bindPeek also runs it')
+})
+
+const SHA = 'f7'.repeat(32)
+const SHA2 = '8a'.repeat(32)
+
+// A decrypted group picture left by an earlier run.
+function placeThumb (author, sha, mtime, size = 10, ext = 'jpg') {
+  const dir = ROOT + 'copyGroupThumbs/'
+  dirs().add(ROOT)
+  dirs().add(dir)
+  const uri = dir + author + '-' + sha + '.' + ext
+  files().set(uri, { bytes: bytesOf(size), mtime: BASE + mtime })
+  return uri
+}
+
+const inDir = (kind) => keptFiles().filter((k) => k.startsWith(ROOT + kind + '/') && !k.endsWith('.tmp'))
+
+test('copy kinds: separate directories and their own constants', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  t.is(keep.KEEP_COPY_MAX_BYTES, 8 * 1024 * 1024)
+  t.is(keep.KEEP_COPY_MAX_FILES, 200)
+  t.is(keep.KEEP_COPY_MAX_AGE_MS, 14 * DAY)
+  t.is(keep.KEEP_GROUP_THUMB_MAX_BYTES, 256 * 1024)
+  const d = desc()
+  const uri = keep.keep('copyPosts', B, d, bytesOf(4))
+  t.ok(uri.startsWith(ROOT + 'copyPosts/'), 'under copyPosts')
+  t.is(keep.keptUrl('copyPosts', B, d), uri)
+  t.is(keep.keptUrl('posts', B, d), null, 'a copy file never answers for a main entry')
+  t.is(keep.keptUrl('peekPosts', B, d), null, 'nor for a peek entry')
+  t.is(keep.keptUrl('copyAvatars', B, d), null, 'nor for a copy avatar')
+  const av = keep.keep('copyAvatars', B, d, bytesOf(4))
+  t.ok(av.startsWith(ROOT + 'copyAvatars/'))
+  t.is(keep.keep('copyGroupThumbs', B, d, bytesOf(4)), null, 'a group picture is kept through keepGroupThumb only')
+  t.is(keep.keptUrl('copyGroupThumbs', B, d), null)
+})
+
+test('a copy file survives every retainKept; a peek file is still deleted by its retain', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const copyPost = placeKept('copyPosts', B, desc({ start: 1 }), 1)
+  const copyAv = placeKept('copyAvatars', B, desc({ start: 2 }), 2)
+  const thumb = placeThumb(B, SHA, 3)
+  const peek = placeKept('peekPosts', B, desc({ start: 3 }), 4)
+  const peekAv = placeKept('peekAvatars', B, desc({ start: 4 }), 5)
+  keep.retainKept(['peekAvatars', 'peekPosts'], [])
+  t.absent(files().has(peek) || files().has(peekAv), 'the peek retain deletes the peek files')
+  t.ok(files().has(copyPost) && files().has(copyAv) && files().has(thumb), 'and leaves the copy files')
+  keep.retainKept(['copyPosts'], [])
+  keep.retainKept(['copyPosts', 'copyAvatars', 'copyGroupThumbs'], [])
+  t.ok(files().has(copyPost) && files().has(copyAv) && files().has(thumb), 'a retain naming the copy kinds deletes nothing')
+})
+
+test('the copy pool holds 200 files on its own counters and never evicts a main or peek file', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const main = []
+  for (let i = 0; i < keep.KEEP_MAX_FILES; i++) main.push(placeKept('posts', A, desc({ start: i + 1 }), i + 1))
+  const peek = []
+  for (let i = 0; i < keep.KEEP_PEEK_MAX_FILES; i++) peek.push(placeKept('peekPosts', B, desc({ start: i + 1 }), i + 1))
+  const copy = []
+  for (let i = 0; i < keep.KEEP_COPY_MAX_FILES; i++) copy.push(placeKept('copyPosts', B, desc({ start: i + 1 }), i + 1))
+  const fresh = keep.keep('copyPosts', OTHER, desc(), bytesOf(4))
+  t.ok(fresh, 'a copy keep over its file cap is admitted')
+  const copyLeft = inDir('copyPosts').length
+  t.ok(copyLeft <= keep.KEEP_COPY_MAX_FILES, 'the copy file cap holds')
+  t.absent(files().has(copy[0]), 'the oldest copy file goes')
+  t.ok(files().has(copy[copy.length - 1]), 'the newest stays')
+  t.is(main.filter((u) => files().has(u)).length, keep.KEEP_MAX_FILES, 'no main file was trimmed for it')
+  t.is(peek.filter((u) => files().has(u)).length, keep.KEEP_PEEK_MAX_FILES, 'no peek file was trimmed for it')
+  t.ok(keep.keep('peekPosts', OTHER, desc(), bytesOf(4)), 'a peek keep over its cap is admitted')
+  t.ok(keep.keep('posts', OTHER, desc(), bytesOf(4)), 'so is a main keep')
+  t.is(inDir('copyPosts').length, copyLeft, 'no copy file was trimmed for them')
+  t.ok(keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg'), 'a group picture is admitted')
+  t.is(inDir('copyPosts').length + inDir('copyGroupThumbs').length, copyLeft + 1, 'and counts in the copy pool')
+})
+
+test('the copy byte cap refuses when only copy files in use are left, the other budgets still keep', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const blocks = 256
+  const big = desc({ blocks, bytes: blocks * 32768 })
+  t.is(big.bytes, keep.KEEP_COPY_MAX_BYTES, 'one largest photo fills the copy budget')
+  const shown = keep.keep('copyPosts', B, big, bytesOf(big.bytes))
+  t.ok(shown, 'kept and in use')
+  const other = desc({ blocks, bytes: blocks * 32768, start: 300 })
+  t.is(keep.keep('copyAvatars', B, other, bytesOf(other.bytes)), null, 'no room beside a file in use')
+  t.is(keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg'), null, 'nor for a group picture')
+  t.ok(files().has(shown), 'nothing deleted')
+  t.ok(keep.keep('peekPosts', B, other, bytesOf(other.bytes)), 'the peek budget takes it')
+  t.ok(keep.keep('posts', B, other, bytesOf(other.bytes)), 'so does the main budget')
+})
+
+test('copy files age out after 14 days, at trim and on read', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const d = desc({ start: 1 })
+  const copyOld = placeKept('copyPosts', B, desc({ start: 1 }), -15 * DAY)
+  const copyNew = placeKept('copyAvatars', B, desc({ start: 2 }), -13 * DAY)
+  const thumbOld = placeThumb(B, SHA, -15 * DAY)
+  const thumbNew = placeThumb(B, SHA2, -13 * DAY)
+  const peekOld = placeKept('peekPosts', B, desc({ start: 3 }), -8 * DAY)
+  const mainOld = placeKept('posts', A, desc({ start: 4 }), -15 * DAY)
+  keep.trimKept()
+  t.absent(files().has(copyOld) || files().has(thumbOld), 'older than 14 days: gone')
+  t.ok(files().has(copyNew) && files().has(thumbNew), 'younger: stays')
+  t.absent(files().has(peekOld), 'the peek kinds keep their 7 days')
+  t.ok(files().has(mainOld), 'the main kinds keep their 30 days')
+
+  const stale = placeKept('copyPosts', B, d, -15 * DAY)
+  t.is(keep.keptUrl('copyPosts', B, d), null, 'a 15-day-old copy file does not answer')
+  t.absent(files().has(stale), 'and is deleted')
+  t.is(keep.keptUrl('copyAvatars', B, desc({ start: 2 })), copyNew, 'a younger one does')
+  const staleThumb = placeThumb(B, SHA, -15 * DAY)
+  t.is(keep.keptGroupThumb(B, SHA), null, 'nor does a 15-day-old group picture')
+  t.absent(files().has(staleThumb))
+  t.is(keep.keptGroupThumb(B, SHA2), thumbNew)
+})
+
+test('a block, a range revoke and a wipe remove copy files; a follow reconcile keeps them', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const copyB = placeKept('copyPosts', B, desc({ start: 1 }), 1)
+  const copyAvB = placeKept('copyAvatars', B, desc({ start: 2 }), 2)
+  const copyOther = placeKept('copyPosts', OTHER, desc({ start: 3, core: OTHER }), 3)
+  const thumbB = placeThumb(B, SHA, 4)
+  const thumbA = placeThumb(A, SHA, 5)
+  const mainB = placeKept('posts', B, desc({ start: 4 }), 6)
+  keep.keepOnlyKeptAuthors([A])
+  t.absent(files().has(mainB), 'the main copy of an unfollowed author goes')
+  t.ok(files().has(copyB) && files().has(copyAvB) && files().has(copyOther) && files().has(thumbB), 'copy files stay')
+  keep.keepOnlyKeptAuthors([])
+  t.ok(files().has(copyB) && files().has(thumbA), 'even with nobody followed')
+  keep.dropKeptRanges([{ core: OTHER, start: 3, blocks: 1 }, { core: CORE, start: 1, blocks: 1 }])
+  t.absent(files().has(copyOther) || files().has(copyB), 'a revoked range removes a copy file')
+  t.ok(files().has(thumbB), 'a group picture has no range')
+  keep.dropKeptAuthors([B])
+  t.absent(files().has(copyAvB) || files().has(thumbB), 'a block removes every copy file and group picture of the author')
+  t.ok(files().has(thumbA), 'of that author only')
+  placeKept('copyPosts', B, desc({ start: 5 }), 7)
+  keep.wipeKept()
+  t.alike(keptFiles(), [], 'a wipe removes them')
+})
+
+test('group pictures: keep, read back, limits and retainGroupThumbs', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const uri = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  t.is(uri, ROOT + 'copyGroupThumbs/' + B + '-' + SHA + '.jpg', 'named by image author and plaintext hash')
+  t.is(keep.keptGroupThumb(B.toUpperCase(), SHA), uri, 'the author is lowercased')
+  t.is(keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg'), uri, 'keeping again is idempotent')
+  t.is(keep.keptGroupThumb(B, SHA2), null, 'another picture is not kept')
+  t.is(keep.keptGroupThumb(A, SHA), null, 'nor another author\'s')
+  for (const [author, sha, bytes, mime, why] of [
+    ['x'.repeat(64), SHA, bytesOf(10), 'image/jpeg', 'author'],
+    [A, '../' + SHA.slice(3), bytesOf(10), 'image/jpeg', 'hash'],
+    [A, SHA.toUpperCase().replace(/F/g, 'G'), bytesOf(10), 'image/jpeg', 'non-hex hash'],
+    [A, SHA, bytesOf(10), 'text/html', 'mime'],
+    [A, SHA, bytesOf(10), 'image/png', 'a type the live draw never shows'],
+    [A, SHA, new Uint8Array(0), 'image/jpeg', 'empty'],
+    [A, SHA, bytesOf(keep.KEEP_GROUP_THUMB_MAX_BYTES + 1), 'image/jpeg', 'over 256 KiB'],
+    [A, SHA, [1, 2], 'image/jpeg', 'bytes only']
+  ]) t.is(keep.keepGroupThumb(author, sha, bytes, mime), null, why)
+  t.ok(keep.keepGroupThumb(A, SHA, bytesOf(keep.KEEP_GROUP_THUMB_MAX_BYTES), 'image/jpeg'), 'exactly 256 KiB is kept')
+  const big = placeThumb(A, SHA2, 1, keep.KEEP_GROUP_THUMB_MAX_BYTES + 1)
+  t.is(keep.keptGroupThumb(A, SHA2), null, 'an oversized file does not answer')
+  t.absent(files().has(big), 'and is deleted')
+
+  const other = placeThumb(A, SHA2, 2)
+  keep.retainGroupThumbs('not a list')
+  keep.retainGroupThumbs(null)
+  t.ok(files().has(other), 'a non-array is ignored')
+  keep.retainGroupThumbs([{ author: B.toUpperCase(), sha: SHA }, null, { author: 'nope', sha: SHA2 }])
+  t.ok(files().has(uri), 'a named picture stays')
+  t.absent(files().has(other), 'an unnamed one goes')
+  t.absent(inDir('copyGroupThumbs').some((k) => k.startsWith(ROOT + 'copyGroupThumbs/' + A)), 'whatever its extension')
+  const post = keep.keep('copyPosts', B, desc(), bytesOf(4))
+  keep.retainGroupThumbs([])
+  t.alike(inDir('copyGroupThumbs'), [], 'an empty list deletes every group picture')
+  t.ok(files().has(post), 'and no other copy file')
+})
+
+test('releaseKept lets a trim delete a copy file or group picture again', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const post = keep.keep('copyPosts', B, desc(), bytesOf(4))
+  keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  const thumb = keep.keptGroupThumb(B, SHA)
+  files().get(post).mtime = BASE - 15 * DAY
+  files().get(thumb).mtime = BASE - 15 * DAY
+  keep.trimKept()
+  t.ok(files().has(post) && files().has(thumb), 'in use: kept past its age')
+  keep.releaseKept(post)
+  keep.releaseKept(thumb)
+  advance(t, keep.KEEP_RELEASE_GRACE_MS + 1000)
+  keep.trimKept()
+  t.absent(files().has(post) || files().has(thumb), 'released and past the grace: gone')
+})
+
+test('the first copy use of a start trims the copy kinds once', async (t) => {
+  reset()
+  const keep = await import('../src/media/keep.native.js?copystart=' + Date.now())
+  const stale = placeKept('copyPosts', OTHER, desc({ start: 7 }), -15 * DAY)
+  const fresh = placeKept('copyPosts', OTHER, desc({ start: 8 }), -1 * DAY)
+  t.is(keep.keptUrl('copyPosts', B, desc({ start: 9 })), null, 'an unrelated miss')
+  t.absent(files().has(stale), 'the stale copy file went at the first use')
+  t.ok(files().has(fresh), 'the young one stays')
+  const later = placeKept('copyPosts', OTHER, desc({ start: 10 }), -15 * DAY)
+  keep.keptUrl('copyPosts', B, desc({ start: 9 }))
+  t.ok(files().has(later), 'only once per start')
+  const keep2 = await import('../src/media/keep.native.js?copystart=b' + Date.now())
+  keep2.bindPeek()
+  t.absent(files().has(later), 'bindPeek also runs it')
+})
+
+test('a written group picture is not left in use: trimmable by age and caps', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const thumb = keep.keepGroupThumb(B, SHA, bytesOf(10), 'image/jpeg')
+  t.ok(thumb, 'kept')
+  files().get(thumb).mtime = BASE - 15 * DAY
+  keep.trimKept()
+  t.absent(files().has(thumb), 'past the copy age: gone at the next trim')
+
+  const old = keep.keepGroupThumb(B, SHA2, bytesOf(10), 'image/jpeg')
+  t.is(keep.keepGroupThumb(B, SHA2, bytesOf(10), 'image/jpeg'), old, 'keeping again does not mark it either')
+  files().get(old).mtime = BASE - 1
+  for (let i = 0; i < keep.KEEP_COPY_MAX_FILES; i++) placeKept('copyPosts', OTHER, desc({ start: i + 1 }), i + 1)
+  keep.trimKept()
+  t.absent(files().has(old), 'over the file cap, the oldest file, a written group picture, is trimmed')
+  t.is(inDir('copyPosts').length, keep.KEEP_COPY_MAX_FILES, 'and no copy photo for it')
+
+  // 180 copy photos in use and 20 left by an earlier run: the trim after the
+  // new picture goes past the 20 and would reach it next.
+  reset()
+  keep.wipeKept()
+  for (let i = 0; i < 20; i++) placeKept('copyPosts', OTHER, desc({ start: 300 + i }), i + 1)
+  let admitted = 0
+  for (let i = 0; i < 180; i++) if (keep.keep('copyPosts', B, desc({ start: i + 1 }), bytesOf(4)) !== null) admitted++
+  t.is(admitted, 180)
+  const fresh = keep.keepGroupThumb(A, SHA, bytesOf(10), 'image/jpeg')
+  t.ok(fresh && files().has(fresh), 'a new picture that crosses the cap survives its own trim')
+  t.is(inDir('copyPosts').length, 180, 'the files not in use made room')
 })

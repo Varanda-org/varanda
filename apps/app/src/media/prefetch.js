@@ -1,4 +1,5 @@
 import { mediaKey } from './cache.js'
+import { persistMode } from './keptLoad.js'
 import { usableThumb } from './variant.js'
 
 // Rows carry media arrays. Empty rows still count toward the lookahead window.
@@ -64,7 +65,7 @@ export function createThumbnailPrefetch ({ cache, load, defer = setTimeout, canc
       const row = upcoming.find(row => row?.thumbs?.includes(d))
       if (!row || typeof row.author !== 'string' || !/^[0-9a-f]{64}$/.test(row.author)) continue
       const policy = typeof persistOf === 'function' ? persistOf(row) : row.persist
-      const persist = policy === true || policy === 'peek' ? policy : false
+      const persist = persistMode(policy)
       next.set(mediaKey(d), { author: row.author, d, persist })
     }
     const same = (a, b) => a && b && a.author === b.author && a.persist === b.persist

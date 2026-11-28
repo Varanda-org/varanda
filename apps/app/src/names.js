@@ -10,7 +10,9 @@
 // the peek stays as the entry instead of null; a profile.read answer always
 // wins over it. Each answer carries the peekScope it started in, and one of an
 // older scope is dropped. forgetVerified drops a kept peek once its diary is
-// gone; isPeeked says whether a key shows one.
+// gone; isPeeked says whether a key shows one. seedPeeked takes the names an
+// earlier run verified (a stored copy): seeds a `missing` answer keeps until
+// this run's peek answers, and isSavedPeek says the peek is still owed.
 // Everything stored is raw peer data and the SCREENS render it through
 // displayText, as plain text.
 //
@@ -46,7 +48,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, pageOnlyEntry, peekReplaces, peekedEntry, settleProfile, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, isSavedPeekKey, missingAnswer, pageOnlyEntry, peekReplaces, peekedEntry, sameOwner, savedRebuild, seedSaved, settleProfile, stableView } from './namesCache'
+import { deniedAuthor } from './localCaches'
 import { fetchMembers } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { createNamePeeker, foldRead, peekApply } from './namesPeek'
@@ -120,6 +123,11 @@ export function NamesProvider ({ children }) {
   const peekedRef = useRef(new Map())
   // Keys whose last profile.read answer in this scope was a profile.
   const heldRef = useRef(new Set())
+  // lowercase key -> peekedEntry an earlier run verified and the device saved
+  // (seedPeeked). It outlives a new epoch or generation, not an identity
+  // change, and goes once this run's peek or a profile answers for the key.
+  const savedRef = useRef(new Map())
+  const savedOwnerRef = useRef(ownKey)
   // Bumped with the epoch/generation: a response of an older scope is dropped.
   const scopeRef = useRef(0)
   const ownKeyRef = useRef(ownKey)
@@ -175,6 +183,33 @@ export function NamesProvider ({ children }) {
   // Seeds for keys not in the cache yet only (namesCache.absentSeeds).
   const seedMany = useCallback((entries) => apply(absentSeeds(cacheRef.current, entries)), [apply])
 
+  // Names an earlier run verified with diary.peek, from a stored copy
+  // ([key, { name, username, avatar }] pairs) saved for `owner`: seeds for
+  // keys the cache (but for a `missing` answer) and this run's peeks do not
+  // hold yet, which a `missing` answer keeps until the peek is asked again
+  // (isSavedPeek). Never for a denied author (namesCache.seedSaved).
+  const seedPeeked = useCallback((entries, owner) => {
+    // A copy read for the previous identity can land after the switch
+    // cleared savedRef: it must not name keys for this one.
+    if (!sameOwner(owner, ownKeyRef.current)) return
+    const valid = (Array.isArray(entries) ? entries : []).filter((pair) => Array.isArray(pair) && typeof pair[0] === 'string' && isKey(pair[0]))
+    const { seeds, next } = seedSaved({
+      known: cacheRef.current,
+      peeked: peekedRef.current,
+      held: heldRef.current,
+      saved: savedRef.current,
+      entries: valid,
+      refused: deniedAuthor,
+      max: MAX_REASK_KEYS,
+      hintOf: (known) => pageHintFields({}, known)
+    })
+    if (next !== null) commit(next)
+    if (seeds.length > 0) apply(seeds)
+  }, [apply, commit])
+
+  // A function, not state: the row peeks re-check it on each plan.
+  const isSavedPeek = useCallback((key) => isSavedPeekKey(savedRef.current, peekedRef.current, key), [])
+
   // Node-verified diary.peek answers ([key, value] pairs). They fill a key the
   // node has no profile for (`missing`, or an older node) or that only a seed
   // named, keeping its page hints, never one a pending or answered
@@ -192,7 +227,10 @@ export function NamesProvider ({ children }) {
       const entry = peekedEntry(value)
       if (entry === null || heldRef.current.has(key)) continue
       const peeked = peekedRef.current
-      const had = peeked.has(key)
+      // A saved peek is replaced as a peek of this run would be, also once a
+      // `missing` answer kept it.
+      const had = peeked.has(key) || savedRef.current.has(key)
+      savedRef.current.delete(key)
       peeked.delete(key)
       peeked.set(key, entry)
       while (peeked.size > MAX_REASK_KEYS) {
@@ -230,6 +268,7 @@ export function NamesProvider ({ children }) {
       if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
       const key = rawKey.toLowerCase()
       peekedRef.current.delete(key)
+      savedRef.current.delete(key)
       if (heldRef.current.has(key)) continue
       const known = next.get(key)
       const entry = forgottenEntry(known, pageHintFields({}, known))
@@ -301,10 +340,11 @@ export function NamesProvider ({ children }) {
         // Authoritative: a null removes what a seed said (username included).
         const old = next.get(key)
         if (entry === null) {
-          // `missing`: only a node-verified diary.peek (learnVerified) stays; a
-          // name the name peeker found does not come back (foldRead).
+          // `missing`: only a node-verified diary.peek (learnVerified) or a
+          // saved one (seedPeeked) stays; a name the name peeker found does
+          // not come back (foldRead).
           heldRef.current.delete(key)
-          next.set(key, missingEntry(peekedRef.current.get(key)))
+          next.set(key, missingAnswer(peekedRef.current, savedRef.current, key, deniedAuthor))
           retryRef.current.delete(key)
           continue
         }
@@ -315,6 +355,7 @@ export function NamesProvider ({ children }) {
         const settled = settleProfile(entry, peekedRef.current.get(key))
         next.set(key, settled.entry)
         if (settled.peek === undefined) peekedRef.current.delete(key)
+        savedRef.current.delete(key)
         heldRef.current.add(key)
         retryRef.current.delete(key)
       }
@@ -403,6 +444,14 @@ export function NamesProvider ({ children }) {
     }
   }, [])
 
+  // Saved peeks belong to one identity: another one (or none) forgets them.
+  // Declared before the epoch effect, so a rebuild never writes them back.
+  useEffect(() => {
+    if (savedOwnerRef.current === ownKey) return
+    savedOwnerRef.current = ownKey
+    savedRef.current.clear()
+  }, [ownKey])
+
   // A new epoch or generation clears values, then re-asks cached/on-screen
   // keys in front, retaining up to 500 with the most recent asks preferred.
   // Stable resolve callbacks do not make mounted screens ask again.
@@ -427,7 +476,8 @@ export function NamesProvider ({ children }) {
     })
     if (peekTimerRef.current !== null) clearTimeout(peekTimerRef.current)
     peekTimerRef.current = null
-    cacheRef.current = new Map()
+    // Saved peeks stay as seeds, so a reopen that re-asks keeps the names.
+    cacheRef.current = savedRebuild(savedRef.current, deniedAuthor)
     setCache(cacheRef.current)
     unsupportedRef.current = false
     setUnsupported(false)
@@ -587,7 +637,7 @@ export function NamesProvider ({ children }) {
     return p === null ? null : p.name
   }, [profileOf])
 
-  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope }), [profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope])
+  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, seedPeeked, isSavedPeek, resolve, resolveMany, invalidate, unsupported, peekScope }), [profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, seedPeeked, isSavedPeek, resolve, resolveMany, invalidate, unsupported, peekScope])
 
   return <NamesContext.Provider value={value}>{children}</NamesContext.Provider>
 }
