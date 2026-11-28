@@ -10,9 +10,14 @@ Branch `feat/bunny-header-precheck`. O script compara a chave do pedido direto c
 - [x] As suítes falham ao retirar, uma checagem por vez: no script, a comparação da chave com o endereço direto, a exigência da zona `media-cdn`, o aviso de perigo para endereços falsos e o `X-Varanda-Precheck` em p0 e em p1 a p3; no Caddyfile, o cabeçalho exigido pela rota, a chave `{header.X-Real-Ip}` em `@viaCdn`, um cabeçalho refletido sem o segredo e a rota inteira. Os arquivos voltam ao checksum original após cada execução.
 - [x] `npm run lint`.
 - [x] `npm run demo` termina com `DEMO OK`.
+- [x] A rota num Caddy em execução, no Docker, com a imagem de `deploy/seeder/Dockerfile.caddy` e um segredo descartável:
+  - `caddy adapt` mostra uma só rota para `/media/precheck-*`, que também exige `X-Varanda-Precheck: 1`.
+  - Sem o cabeçalho, ou com `0`, `true`, `11` ou vazio, o pedido vai ao semeador. `1 ` chega como `1` (o HTTP tira os espaços em volta) e recebe o eco.
+  - As três zonas respondem a chave certa: `media` com o endereço da conexão, `media-cdn` com o `X-Real-IP` e `media-cdn-borda` com o endereço da conexão. Respondem com `no-store`, `text/plain` e `nosniff`, e nunca mostram o segredo.
+  - 600 pedidos à rota não gastam a janela de `/media/*`: depois deles, 480 pedidos de mídia dão 200, o 481º dá 429 e a rota continua respondendo.
+  - O script, por um Bunny simulado, sai com 0 quando o Bunny põe o endereço da visita nos dois cabeçalhos, com 1 (PERIGO) quando repassa os da visita, com 1 sem a regra do segredo e com 2 quando descarta `X-Varanda-Precheck`. Com o segredo vazio no servidor, para em g1 com 2, antes de pedir ao Bunny. A saída nunca tem o segredo.
 
 ## Não conferido
 
-- A rota num Caddy em execução (sem binário do Caddy nesta máquina; Docker só com aprovação).
 - Se o Bunny repassa `X-Varanda-Precheck` à origem. Se não repassar, os três pedidos pelo Bunny recebem 404 e o script sai com 2.
 - A pré-checagem com o Bunny e o servidor reais, que o mantenedor roda seguindo `docs/cdn.md`, seção "Bunny".
